@@ -1,0 +1,10 @@
+# Secrets (at any level)
+.env
+
+# Files and folders kept only at the repository root
+/mach/
+/*.sql
+/*.pdf
+/*.docx
+/*.md
+/*.png
