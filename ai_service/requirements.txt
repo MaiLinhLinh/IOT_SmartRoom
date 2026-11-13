@@ -1,0 +1,6 @@
+# AI service — YOLO đếm người + Gemini ra quyết định
+ultralytics>=8.3        # YOLO (tự cài torch; máy có GPU NVIDIA nên cài torch bản CUDA trước)
+opencv-python>=4.8
+numpy
+requests>=2.31
+python-dotenv>=1.0
