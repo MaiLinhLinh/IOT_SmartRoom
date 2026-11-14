@@ -45,7 +45,9 @@ def send_command(
 
     state, _, _ = apply_command(
         db,
-        fan_level=body.fan_level,
+        fan1=body.fan1,
+        fan2=body.fan2,
+        fan3=body.fan3,
         ac_on=body.ac_on,
         ac_temp=body.ac_temp,
         mode="MANUAL",
@@ -69,7 +71,9 @@ def change_mode(
 
     state, _, _ = apply_command(
         db,
-        fan_level=state.fan_level,
+        fan1=state.fan1,
+        fan2=state.fan2,
+        fan3=state.fan3,
         ac_on=state.ac_on,
         ac_temp=state.ac_temp,
         mode=body.mode,

@@ -1,9 +1,14 @@
-# AIoT Smart Room — API Contract v3
+# AIoT Smart Room — API Contract v4
 
 > Base URL: `http://<IP_LAPTOP>:8006` (dev: `http://localhost:8006`)
 > Swagger: `http://localhost:8006/docs`
-> DB: SQL Server `aiot_db` (schema v3)
-> Version: `3.0.0`
+> DB: SQL Server `aiot_db` (schema v4)
+> Version: `4.0.0`
+>
+> **v4 thay đổi:** 1 quạt 3 mức (`fan_level` 0–3) → **3 quạt độc lập bật/tắt**
+> (`fan1`, `fan2`, `fan3`, kiểu `bool`). Không tương thích ngược với log cũ.
+> Phần AI (`/api/ai/*`, ai_engine nội bộ, ai_service Gemini) **chưa cập nhật** theo v4 —
+> endpoint AI vẫn nhận schema cũ nhưng sẽ lỗi khi thực thi cho đến khi được sửa sau.
 
 ---
 
@@ -21,7 +26,7 @@ Token lấy từ `POST /auth/login`, hết hạn sau 7 ngày (`ACCESS_TOKEN_EXPI
 ### Kiểu dữ liệu
 | Field | Giá trị |
 |---|---|
-| `fan_level` | `0` tắt, `1` mức 1, `2` mức 2, `3` mức 3 |
+| `fan1` / `fan2` / `fan3` | `true` = quạt bật, `false` = quạt tắt (3 quạt độc lập) |
 | `ac_on` | `true` / `false` |
 | `ac_temp` | `16`–`32` (°C) |
 | `mode` | `"MANUAL"` hoặc `"AUTO"` |
@@ -168,7 +173,9 @@ Trả về `UserOut` như trên.
   "temperature": 30.5,
   "humidity": 70.0,
   "people_count": 3,
-  "fan_level": 2,
+  "fan1": true,
+  "fan2": true,
+  "fan3": false,
   "ac_on": true,
   "ac_temp": 25,
   "mode": "MANUAL"
@@ -190,12 +197,14 @@ ESP32 gọi mỗi 5 giây (không cần auth).
 Nguồn chính cho Dashboard. ESP32 poll mỗi 2 giây.
 ```json
 {
-  "fan_level": 2,
+  "fan1": true,
+  "fan2": true,
+  "fan3": false,
   "ac_on": true,
   "ac_temp": 26,
   "mode": "AUTO",
   "updated_at": "2026-10-31T22:03:24",
-  "ai_reason": "Phát hiện 3 người, nhiệt độ 30.5°C khá nóng → Quạt mức 2, bật điều hòa 26°C",
+  "ai_reason": "Phát hiện 3 người, nhiệt độ 30.5°C khá nóng → Bật quạt 1, 2 + điều hòa 26°C",
   "people_count": 3,
   "people_source": "YOLO",
   "people_updated_at": "2026-10-31T22:03:15"
@@ -207,7 +216,9 @@ Nguồn chính cho Dashboard. ESP32 poll mỗi 2 giây.
 ### `POST /api/device/command` 🔒 (MANUAL)
 ```json
 {
-  "fan_level": 2,
+  "fan1": true,
+  "fan2": true,
+  "fan3": false,
   "ac_on": true,
   "ac_temp": 25
 }
@@ -269,6 +280,9 @@ Body:
 > AI **không gửi trực tiếp xuống ESP32**. Luồng:
 > `AI → POST /api/ai/command → device_state → ESP32 poll GET /api/device/state (2s) → LED/LCD`
 >
+> ⚠️ **Từ v4, phần AI chưa được cập nhật** (sẽ sửa sau): endpoint vẫn nhận `fan_level`
+> theo schema cũ nhưng sẽ lỗi khi thực thi. Chờ ai_service chuyển sang `fan1/fan2/fan3`.
+>
 > Khi dùng AI bên ngoài, đặt `AI_ENGINE_ENABLED=false` trong `.env` để AI engine nội bộ không ghi đè.
 
 Nếu `.env` có `AI_API_KEY`, bắt buộc header:
@@ -281,7 +295,9 @@ Dữ liệu gộp để AI ra quyết định trong 1 lần gọi.
 ```json
 {
   "mode": "AUTO",
-  "fan_level": 2,
+  "fan1": true,
+  "fan2": true,
+  "fan3": false,
   "ac_on": true,
   "ac_temp": 26,
   "people_count": 3,
@@ -298,10 +314,12 @@ Dữ liệu gộp để AI ra quyết định trong 1 lần gọi.
 Chỉ hợp lệ khi thiết bị đang `AUTO` (nếu MANUAL trả `409`).
 ```json
 {
-  "fan_level": 2,
+  "fan1": true,
+  "fan2": true,
+  "fan3": false,
   "ac_on": true,
   "ac_temp": 25,
-  "ai_reason": "Phát hiện 3 người, nhiệt độ 30.5°C khá nóng → Bật AC 25°C, quạt mức 2"
+  "ai_reason": "Phát hiện 3 người, nhiệt độ 30.5°C khá nóng → Bật quạt 1, 2 + điều hòa 25°C"
 }
 ```
 `200`: trả `DeviceStateOut`.
@@ -336,7 +354,9 @@ Ví dụ: `/api/logs?page=1&size=20&mode=AUTO&from_date=2026-10-01T00:00:00`
       "temperature": 30.5,
       "humidity": 70.0,
       "people_count": 3,
-      "fan_level": 2,
+      "fan1": true,
+      "fan2": true,
+      "fan3": false,
       "ac_on": true,
       "ac_temp": 25,
       "mode": "MANUAL"
@@ -378,14 +398,18 @@ Query:
       "actor_user_id": null,
       "source": "AI",
       "description": "Chỉnh điều hòa 26°C",
-      "fan_level": 2,
+      "fan1": true,
+      "fan2": true,
+      "fan3": false,
       "ac_on": true,
       "ac_temp": 26,
       "mode": "AUTO",
-      "fan_level_prev": 2,
+      "fan1_prev": true,
+      "fan2_prev": true,
+      "fan3_prev": false,
       "ac_on_prev": true,
       "ac_temp_prev": 25,
-      "ai_reason": "Phát hiện 3 người, nhiệt độ 30.5°C khá nóng → Quạt mức 2, bật điều hòa 26°C",
+      "ai_reason": "Phát hiện 3 người, nhiệt độ 30.5°C khá nóng → Bật quạt 1, 2 + điều hòa 26°C",
       "temperature": 30.5,
       "humidity": 70.0,
       "people_count": 3
@@ -398,11 +422,15 @@ Query:
       "actor_user_id": 1,
       "source": "MANUAL",
       "description": "Chỉnh điều hòa 25°C",
-      "fan_level": 2,
+      "fan1": true,
+      "fan2": true,
+      "fan3": false,
       "ac_on": true,
       "ac_temp": 25,
       "mode": "MANUAL",
-      "fan_level_prev": 2,
+      "fan1_prev": true,
+      "fan2_prev": true,
+      "fan3_prev": false,
       "ac_on_prev": true,
       "ac_temp_prev": 26,
       "ai_reason": null,
@@ -588,14 +616,15 @@ uvicorn main:app --host 0.0.0.0 --port 8006 --reload
 
 **Hai kênh riêng biệt**
 1. Đếm người → `POST /api/people/count` với `{"count": N, "source": "YOLO"}`.
-2. Ra quyết định → `POST /api/ai/command` với `fan_level`, `ac_on`, `ac_temp`, `ai_reason`.
+2. Ra quyết định → `POST /api/ai/command` với `fan_level`, `ac_on`, `ac_temp`, `ai_reason`
+   ⚠️ (chưa cập nhật v4 — sau sẽ đổi thành `fan1/fan2/fan3`).
 
 **Điều khiển**
 - AI **không gửi trực tiếp xuống ESP32**. Gửi lên backend; ESP32 tự poll `/api/device/state` mỗi 2s.
 - Trước khi dùng AI bên ngoài, phối hợp đặt `AI_ENGINE_ENABLED=false` trong `.env` backend, nếu không AI nội bộ sẽ ghi đè quyết định.
 - `/api/ai/command` chỉ hợp lệ khi thiết bị đang `AUTO`. Nếu `MANUAL` → `409`.
 - `ai_reason` **bắt buộc**, viết tiếng Việt rõ ràng (hiển thị Dashboard + trang 6).
-- `fan_level`: `0–3`; `ac_temp`: `16–32`; không gửi `mode` (backend luôn ghi `AUTO`).
+- `fan_level`: `0–3` (⚠️ chưa cập nhật v4, sẽ đổi thành `fan1/fan2/fan3`); `ac_temp`: `16–32`; không gửi `mode` (backend luôn ghi `AUTO`).
 - Gửi lặp cùng giá trị không tạo log rác; chỉ ghi `control_logs` khi trạng thái thực sự đổi.
 
 **Dữ liệu đầu vào**

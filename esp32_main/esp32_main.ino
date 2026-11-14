@@ -8,7 +8,7 @@
 // ====== CẤU HÌNH WIFI & SERVER ======
 const char* WIFI_SSID     = "PTIT_B2";
 const char* WIFI_PASSWORD = "";
-const char* SERVER_URL    = "http://10.18.2.49:8006";  // ipconfig để lấy IP
+const char* SERVER_URL    = "http://10.18.3.220:8006";  // ipconfig để lấy IP
 
 // ====== CHÂN GPIO — KHỚP VỚI MẠCH ĐÃ LẮP ======
 #define DHTPIN    4      // DHT11 DATA → D4
@@ -28,7 +28,10 @@ DHT dht(DHTPIN, DHTTYPE);
 LiquidCrystal_I2C lcd(0x27, 16, 2);  // Đổi thành 0x3F nếu 0x27 không được
 
 // ====== BIẾN TRẠNG THÁI THIẾT BỊ (nhận từ server) ======
-int    fanLevel = 0;       // 0=tắt, 1=mức1, 2=mức2, 3=mức3
+// v4: 3 quạt độc lập, mỗi quạt chỉ bật/tắt — LED i sáng ⇔ quạt i bật
+bool   fan1     = false;   // Quạt 1 → LED1 (D18)
+bool   fan2     = false;   // Quạt 2 → LED2 (D19)
+bool   fan3     = false;   // Quạt 3 → LED3 (D23)
 bool   acOn     = false;   // Điều hòa bật/tắt
 int    acTemp   = 26;      // Nhiệt độ đặt điều hòa
 String devMode  = "MANUAL"; // "MANUAL" hoặc "AUTO"
@@ -157,7 +160,8 @@ void fetchAndApplyState() {
   int code = http.GET();
   if (code == 200) {
     String payload = http.getString();
-    StaticJsonDocument<256> doc;
+    // 1024 để đủ chứa ai_reason dài (tối đa 500 ký tự) từ server
+    StaticJsonDocument<1024> doc;
     DeserializationError error = deserializeJson(doc, payload);
     if (error) {
       Serial.print("JSON state loi: ");
@@ -166,7 +170,9 @@ void fetchAndApplyState() {
       return;
     }
 
-    if (!doc["fan_level"].is<int>() ||
+    if (!doc["fan1"].is<bool>() ||
+        !doc["fan2"].is<bool>() ||
+        !doc["fan3"].is<bool>() ||
         !doc["ac_on"].is<bool>() ||
         !doc["ac_temp"].is<int>() ||
         !doc["mode"].is<const char*>()) {
@@ -175,23 +181,26 @@ void fetchAndApplyState() {
       return;
     }
 
-    int newFanLevel = doc["fan_level"].as<int>();
-    bool newAcOn    = doc["ac_on"].as<bool>();
-    int newAcTemp   = doc["ac_temp"].as<int>();
-    String newMode  = doc["mode"].as<String>();
+    bool newFan1  = doc["fan1"].as<bool>();
+    bool newFan2  = doc["fan2"].as<bool>();
+    bool newFan3  = doc["fan3"].as<bool>();
+    bool newAcOn  = doc["ac_on"].as<bool>();
+    int  newAcTemp = doc["ac_temp"].as<int>();
+    String newMode = doc["mode"].as<String>();
 
-    if (newFanLevel < 0 || newFanLevel > 3 ||
-        newAcTemp < 16 || newAcTemp > 32 ||
+    if (newAcTemp < 16 || newAcTemp > 32 ||
         (newMode != "MANUAL" && newMode != "AUTO")) {
       Serial.println("JSON state co gia tri khong hop le - bo qua");
       http.end();
       return;
     }
 
-    fanLevel = newFanLevel;
-    acOn     = newAcOn;
-    acTemp   = newAcTemp;
-    devMode  = newMode;
+    fan1    = newFan1;
+    fan2    = newFan2;
+    fan3    = newFan3;
+    acOn    = newAcOn;
+    acTemp  = newAcTemp;
+    devMode = newMode;
     applyFanLEDs();
     updateLCD();
   } else {
@@ -200,15 +209,12 @@ void fetchAndApplyState() {
   http.end();
 }
 
-// ====== ĐIỀU KHIỂN LED THEO MỨC QUẠT ======
+// ====== ĐIỀU KHIỂN LED THEO TỪNG QUẠT ĐỘC LẬP ======
 void applyFanLEDs() {
-  // Mức 1: LED1 sáng, 2,3 tắt
-  // Mức 2: LED1+LED2 sáng, LED3 tắt
-  // Mức 3: cả 3 LED sáng
-  // Mức 0: tắt hết
-  digitalWrite(LED1, fanLevel >= 1 ? HIGH : LOW);
-  digitalWrite(LED2, fanLevel >= 2 ? HIGH : LOW);
-  digitalWrite(LED3, fanLevel >= 3 ? HIGH : LOW);
+  // LED i sáng ⇔ quạt i bật (không còn khái niệm mức)
+  digitalWrite(LED1, fan1 ? HIGH : LOW);
+  digitalWrite(LED2, fan2 ? HIGH : LOW);
+  digitalWrite(LED3, fan3 ? HIGH : LOW);
 }
 
 // ====== CẬP NHẬT LCD ======
@@ -220,9 +226,13 @@ void updateLCD() {
   String line0 = (devMode == "AUTO" ? "AUTO" : "MAN ");
   line0 += " T:" + String((int)lastTemp) + "C";
   lcd.print(line0.substring(0, 16));
-  // Dòng 1: Trạng thái quạt + điều hòa
+  // Dòng 1: Trạng thái 3 quạt (bitmask) + điều hòa
+  // Ví dụ "F:101 AC:ON 25C" = quạt 1,3 bật; quạt 2 tắt; AC bật 25°C
   lcd.setCursor(0, 1);
-  String line1 = "Fan:" + String(fanLevel);
+  String line1 = "F:";
+  line1 += (fan1 ? "1" : "0");
+  line1 += (fan2 ? "1" : "0");
+  line1 += (fan3 ? "1" : "0");
   line1 += " AC:" + String(acOn ? "ON" : "OFF");
   if (acOn) line1 += " " + String(acTemp) + "C";
   lcd.print(line1.substring(0, 16));

@@ -1,5 +1,5 @@
 """
-init_db.py — Khởi tạo / reset database theo schema v3.
+init_db.py — Khởi tạo / reset database theo schema v4 (3 quạt độc lập).
 
 Ví dụ:
     python init_db.py --reset --admin-username admin --admin-password admin123
@@ -36,7 +36,7 @@ def main() -> None:
         print("[init_db] Đã drop toàn bộ bảng cũ")
 
     Base.metadata.create_all(bind=engine)
-    print("[init_db] Đã tạo/cập nhật bảng theo schema v3")
+    print("[init_db] Đã tạo/cập nhật bảng theo schema v4")
 
     db = SessionLocal()
     try:

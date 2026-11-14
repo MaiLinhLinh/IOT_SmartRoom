@@ -27,7 +27,9 @@ def get_state(db: Session) -> DeviceState:
 
 def build_description(
     *,
-    fan_level: int,
+    fan1: bool,
+    fan2: bool,
+    fan3: bool,
     ac_on: bool,
     ac_temp: int,
     mode: str,
@@ -36,8 +38,11 @@ def build_description(
     """Trả về (câu mô tả tiếng Việt, có_thay_đổi_không)."""
     parts = []
 
-    if fan_level != prev.fan_level:
-        parts.append("Tắt quạt" if fan_level == 0 else f"Bật quạt mức {fan_level}")
+    fan_news = (fan1, fan2, fan3)
+    fan_prevs = (prev.fan1, prev.fan2, prev.fan3)
+    for i, (new, old) in enumerate(zip(fan_news, fan_prevs), start=1):
+        if new != old:
+            parts.append(f"Bật quạt {i}" if new else f"Tắt quạt {i}")
 
     if ac_on != prev.ac_on:
         parts.append(
@@ -60,7 +65,9 @@ def build_description(
 def apply_command(
     db: Session,
     *,
-    fan_level: int,
+    fan1: bool,
+    fan2: bool,
+    fan3: bool,
     ac_on: bool,
     ac_temp: int,
     mode: str,
@@ -76,19 +83,25 @@ def apply_command(
     """
     state = get_state(db)
 
-    prev_fan = state.fan_level
+    prev_fan1 = state.fan1
+    prev_fan2 = state.fan2
+    prev_fan3 = state.fan3
     prev_ac_on = state.ac_on
     prev_ac_temp = state.ac_temp
 
     description, changed = build_description(
-        fan_level=fan_level,
+        fan1=fan1,
+        fan2=fan2,
+        fan3=fan3,
         ac_on=ac_on,
         ac_temp=ac_temp,
         mode=mode,
         prev=state,
     )
 
-    state.fan_level = fan_level
+    state.fan1 = fan1
+    state.fan2 = fan2
+    state.fan3 = fan3
     state.ac_on = ac_on
     state.ac_temp = ac_temp
     state.mode = mode
@@ -108,11 +121,15 @@ def apply_command(
             actor_user_id=actor_user_id,
             source=source,
             description=description,
-            fan_level=fan_level,
+            fan1=fan1,
+            fan2=fan2,
+            fan3=fan3,
             ac_on=ac_on,
             ac_temp=ac_temp,
             mode=mode,
-            fan_level_prev=prev_fan,
+            fan1_prev=prev_fan1,
+            fan2_prev=prev_fan2,
+            fan3_prev=prev_fan3,
             ac_on_prev=prev_ac_on,
             ac_temp_prev=prev_ac_temp,
             ai_reason=ai_reason,

@@ -1,5 +1,6 @@
 """
-schemas.py — Pydantic schemas v3 (contract cuối cho Flutter)
+schemas.py — Pydantic schemas v4 (contract cuối cho Flutter)
+v4: 1 quạt 3 mức (fan_level) → 3 quạt độc lập bật/tắt (fan1, fan2, fan3)
 """
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional
@@ -72,7 +73,9 @@ class SensorDataOut(BaseModel):
     temperature:  Optional[float]
     humidity:     Optional[float]
     people_count: int
-    fan_level:    int
+    fan1:         bool
+    fan2:         bool
+    fan3:         bool
     ac_on:        bool
     ac_temp:      int
     mode:         str
@@ -85,7 +88,9 @@ class SensorDataOut(BaseModel):
 
 class DeviceStateOut(BaseModel):
     """GET /api/device/state — Dashboard đọc toàn bộ trạng thái."""
-    fan_level:         int
+    fan1:              bool
+    fan2:              bool
+    fan3:              bool
     ac_on:             bool
     ac_temp:           int
     mode:              str
@@ -106,7 +111,9 @@ class DeviceCommandIn(BaseModel):
     """
     model_config = ConfigDict(extra="forbid")
 
-    fan_level: int  = Field(..., ge=0, le=3)
+    fan1:      bool
+    fan2:      bool
+    fan3:      bool
     ac_on:     bool
     ac_temp:   int  = Field(default=26, ge=16, le=32)
 
@@ -153,11 +160,15 @@ class ControlLogOut(BaseModel):
     actor_user_id:  Optional[int] = None
     source:         str
     description:    str
-    fan_level:      int
+    fan1:           bool
+    fan2:           bool
+    fan3:           bool
     ac_on:          bool
     ac_temp:        int
     mode:           str
-    fan_level_prev: Optional[int]
+    fan1_prev:      Optional[bool]
+    fan2_prev:      Optional[bool]
+    fan3_prev:      Optional[bool]
     ac_on_prev:     Optional[bool]
     ac_temp_prev:   Optional[int]
     ai_reason:      Optional[str]
@@ -184,7 +195,9 @@ class LogOut(BaseModel):
     temperature:  Optional[float]
     humidity:     Optional[float]
     people_count: int
-    fan_level:    int
+    fan1:         bool
+    fan2:         bool
+    fan3:         bool
     ac_on:        bool
     ac_temp:      int
     mode:         str

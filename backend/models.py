@@ -1,6 +1,7 @@
 """
-models.py — SQLAlchemy ORM models (schema v3)
+models.py — SQLAlchemy ORM models (schema v4)
 Bao gồm: sensor_logs, device_state, users, control_logs
+v4: 1 quạt 3 mức (fan_level) → 3 quạt độc lập bật/tắt (fan1, fan2, fan3)
 """
 from sqlalchemy import (
     Column, Integer, Float, Unicode, Boolean, DateTime, ForeignKey
@@ -18,7 +19,9 @@ class SensorLog(Base):
     temperature  = Column(Float, nullable=True)
     humidity     = Column(Float, nullable=True)
     people_count = Column(Integer, nullable=False, default=0)
-    fan_level    = Column(Integer, nullable=False, default=0)
+    fan1         = Column(Boolean, nullable=False, default=False)  # Quạt 1
+    fan2         = Column(Boolean, nullable=False, default=False)  # Quạt 2
+    fan3         = Column(Boolean, nullable=False, default=False)  # Quạt 3
     ac_on        = Column(Boolean, nullable=False, default=False)
     ac_temp      = Column(Integer, nullable=False, default=26)
     mode         = Column(Unicode(10), nullable=False, default="MANUAL")
@@ -29,7 +32,9 @@ class DeviceState(Base):
     __tablename__ = "device_state"
 
     id                = Column(Integer, primary_key=True, default=1)
-    fan_level         = Column(Integer, nullable=False, default=0)
+    fan1              = Column(Boolean, nullable=False, default=False)  # Quạt 1
+    fan2              = Column(Boolean, nullable=False, default=False)  # Quạt 2
+    fan3              = Column(Boolean, nullable=False, default=False)  # Quạt 3
     ac_on             = Column(Boolean, nullable=False, default=False)
     ac_temp           = Column(Integer, nullable=False, default=26)
     mode              = Column(Unicode(10), nullable=False, default="MANUAL")
@@ -68,12 +73,16 @@ class ControlLog(Base):
     source         = Column(Unicode(20), nullable=False, default="MANUAL")  # "MANUAL" | "AI"
     description    = Column(Unicode(500), nullable=False)
 
-    fan_level      = Column(Integer, nullable=False)
+    fan1           = Column(Boolean, nullable=False, default=False)  # Quạt 1
+    fan2           = Column(Boolean, nullable=False, default=False)  # Quạt 2
+    fan3           = Column(Boolean, nullable=False, default=False)  # Quạt 3
     ac_on          = Column(Boolean, nullable=False)
     ac_temp        = Column(Integer, nullable=False)
     mode           = Column(Unicode(10), nullable=False)
 
-    fan_level_prev = Column(Integer, nullable=True)
+    fan1_prev      = Column(Boolean, nullable=True)
+    fan2_prev      = Column(Boolean, nullable=True)
+    fan3_prev      = Column(Boolean, nullable=True)
     ac_on_prev     = Column(Boolean, nullable=True)
     ac_temp_prev   = Column(Integer, nullable=True)
 
