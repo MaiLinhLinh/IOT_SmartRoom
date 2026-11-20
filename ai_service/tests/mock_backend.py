@@ -14,16 +14,17 @@ from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 app = FastAPI(title="Mock AIoT backend")
 
-STATE = {
-    "mode": "AUTO", "fan_level": 0, "ac_on": False, "ac_temp": 26,
+INITIAL_STATE = {
+    "mode": "AUTO", "fan1": False, "fan2": False, "fan3": False, "ac_on": False, "ac_temp": 26,
     "people_count": 0, "people_source": "NONE", "people_updated_at": None,
     "temperature": 30.5, "humidity": 72.0, "sensor_timestamp": datetime.now().isoformat(),
     "ai_reason": None,
 }
+STATE = dict(INITIAL_STATE)
 COMMANDS: list[dict] = []
 PEOPLE_KEY = os.getenv("PEOPLE_API_KEY", "")
 AI_KEY = os.getenv("AI_API_KEY", "")
@@ -35,7 +36,11 @@ class PeopleCountIn(BaseModel):
 
 
 class AIDecisionIn(BaseModel):
-    fan_level: int = Field(..., ge=0, le=3)
+    """Contract v4 (đề xuất cho backend): 3 quạt độc lập."""
+    model_config = ConfigDict(extra="forbid")
+    fan1: bool
+    fan2: bool
+    fan3: bool
     ac_on: bool
     ac_temp: int = Field(default=26, ge=16, le=32)
     ai_reason: str = Field(..., min_length=1, max_length=500)
@@ -66,7 +71,8 @@ def command(body: AIDecisionIn, x_api_key: Optional[str] = Header(default=None))
         raise HTTPException(401, "X-API-Key không hợp lệ")
     if STATE["mode"] != "AUTO":
         raise HTTPException(409, "Thiết bị đang MANUAL. Chuyển sang AUTO trước khi AI điều khiển.")
-    STATE.update(fan_level=body.fan_level, ac_on=body.ac_on, ac_temp=body.ac_temp, ai_reason=body.ai_reason)
+    STATE.update(fan1=body.fan1, fan2=body.fan2, fan3=body.fan3, ac_on=body.ac_on,
+                 ac_temp=body.ac_temp, ai_reason=body.ai_reason)
     COMMANDS.append(body.model_dump())
     return STATE
 
@@ -98,15 +104,14 @@ def mock_gemini(model: str, body: dict, x_goog_api_key: Optional[str] = Header(d
     if model.endswith("-quota"):
         return Response("{}", status_code=429, media_type="application/json")
     prompt = body["contents"][0]["parts"][0]["text"]
-    people = re.search(r"Số người trong phòng: (\d+)", prompt)
-    temp = float(re.search(r"Nhiệt độ phòng \(DHT11\): ([\d.]+)", prompt).group(1))
-    n = int(people.group(1)) if people else None
-    if n == 0:
-        out = {"fan_level": 0, "ac_on": False, "ac_temp": 26, "ai_reason": f"Phòng trống, {temp}°C → tắt hết."}
-    elif temp >= 29:
-        out = {"fan_level": 2, "ac_on": True, "ac_temp": 25, "ai_reason": f"{n} người, {temp}°C nóng → AC 25°C + quạt 2."}
-    else:
-        out = {"fan_level": 1, "ac_on": False, "ac_temp": 26, "ai_reason": f"{n} người, {temp}°C dễ chịu → quạt 1."}
+    if model.endswith("-hot"):  # Gemini "chọn sai": tắt hết dù nóng → để test comfort guard
+        out = {"fan_count": 0, "ac_on": False, "ac_temp": 26, "ai_reason": "Thử chọn tắt hết."}
+    else:  # Gemini giả: làm theo phương án đề xuất của planner
+        rec = re.search(r"PHƯƠNG ÁN ĐỀ XUẤT: (\d) quạt \+ (?:điều hòa (\d+)°C|tắt điều hòa) \(([^,]+)", prompt)
+        n, tset, label = int(rec.group(1)), rec.group(2), rec.group(3)
+        people = re.search(r"Số người: (\d+)", prompt).group(1)
+        out = {"fan_count": n, "ac_on": tset is not None, "ac_temp": int(tset or 26),
+               "ai_reason": f"{people} người → {label}: {n} quạt" + (f" + điều hòa {tset}°C" if tset else "")}
     text = "```json\n" + json.dumps(out, ensure_ascii=False) + "\n```"
     return {"candidates": [{"content": {"parts": [{"text": text}]}, "finishReason": "STOP"}]}
 
@@ -122,6 +127,25 @@ def set_sensor(body: SensorIn):
 @app.patch("/test/mode/{mode}")
 def set_mode(mode: str):
     STATE["mode"] = mode
+    return STATE
+
+
+@app.put("/test/config")
+def set_config(body: dict):
+    """Giả lập người dùng nhập hồ sơ thiết bị trên app → backend trả trong /api/ai/context "config"."""
+    if body:
+        STATE["config"] = body
+    else:
+        STATE.pop("config", None)
+    return STATE
+
+
+@app.post("/test/reset")
+def reset():
+    STATE.clear()
+    STATE.update(INITIAL_STATE, sensor_timestamp=datetime.now().isoformat())
+    COMMANDS.clear()
+    GEMINI_CALLS.clear()
     return STATE
 
 

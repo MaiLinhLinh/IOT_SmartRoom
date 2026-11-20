@@ -1,54 +1,79 @@
 """
-prompts.py — Prompt và schema JSON gửi cho Gemini.
+prompts.py — Prompt và schema JSON gửi cho Gemini (backend v4: 3 quạt độc lập + 1 điều hòa).
+
+Gemini không "đoán" từ đầu: bộ lập kế hoạch (rules.py) đã tính sẵn nhiệt độ cảm nhận và
+công suất ước tính của từng phương án. Gemini đọc bảng đó cùng bối cảnh (xu hướng, số người,
+trạng thái hiện tại), chọn phương án cuối cùng và viết lý do cho người dùng.
 """
 from datetime import datetime
 from typing import Optional
 
 SYSTEM_PROMPT_TEMPLATE = """Bạn là bộ điều khiển khí hậu của một phòng học/phòng làm việc thông minh (hệ thống IoT).
-Nhiệm vụ: dựa vào số người trong phòng, nhiệt độ, độ ẩm và trạng thái thiết bị hiện tại, chọn cấu hình quạt và điều hòa
-sao cho người trong phòng thoải mái, đồng thời tiết kiệm điện.
+Mục tiêu: người trong phòng thấy thoải mái (nhiệt độ cảm nhận ≤ {comfort:.1f}°C) với ĐIỆN NĂNG THẤP NHẤT.
 
-THIẾT BỊ
-- Quạt: fan_level = 0 (tắt), 1, 2, 3 (mạnh nhất). Quạt tốn ít điện hơn điều hòa rất nhiều.
-- Điều hòa: ac_on = true/false; ac_temp = nhiệt độ đặt, số nguyên từ {ac_min} đến {ac_max} °C.
+THIẾT BỊ (do người dùng khai báo)
+{devices}
+- Bạn chỉ chọn SỐ quạt bật (fan_count 0–{max_fans}); hệ thống tự chọn quạt cụ thể tốn ít điện và ít bật/tắt nhất.
 
-NGUYÊN TẮC
-1. Không có người và dữ liệu số người còn mới → tắt quạt và điều hòa.
-2. Vùng thoải mái mục tiêu: nhiệt độ 24–27°C, độ ẩm 40–70%.
-3. Ưu tiên quạt trước. Chỉ bật điều hòa khi nóng rõ rệt (khoảng từ 28°C), hoặc vừa ấm vừa ẩm
-   (từ 27°C và độ ẩm từ 70%), hoặc phòng đông người làm nhiệt tăng nhanh.
-4. Càng đông người càng sinh nhiều nhiệt: cân nhắc tăng 1 mức quạt hoặc hạ nhiệt độ đặt 1°C.
-5. Không đặt điều hòa quá lạnh: thường 25–27°C; chỉ xuống 24°C khi rất nóng (từ 31°C) và đông người.
-6. Tránh bật/tắt liên tục: nếu trạng thái hiện tại vẫn hợp lý và môi trường chỉ thay đổi nhỏ thì GIỮ NGUYÊN.
-7. Nếu số người KHÔNG RÕ (dữ liệu camera đã cũ) → giữ ổn định, không tắt các thiết bị đang chạy chỉ vì thiếu dữ liệu.
-8. Khi điều hòa tắt, vẫn trả ac_temp (giữ nguyên giá trị đặt hiện tại).
+CHIẾN LƯỢC (đã được bộ tính toán áp dụng để lập bảng phương án)
+1. CHỈ QUẠT khi gió quạt đủ bù phần nóng: quạt tạo hiệu ứng mát ~1.5°C (1 quạt) đến ~3°C (3 quạt),
+   tốn rất ít điện so với điều hòa. Dùng ít quạt nhất mà vẫn đủ mát.
+2. KẾT HỢP khi quạt không đủ: bật điều hòa KÈM quạt để đặt nhiệt độ cao hơn (27–28°C),
+   vì mỗi quạt cho phép nâng nhiệt độ đặt ~1–1.5°C, tiết kiệm hơn điện quạt tiêu thụ.
+3. CHỈ ĐIỀU HÒA khi độ ẩm rất cao (≥ {humid:.0f}%): mồ hôi khó bay hơi nên gió quạt kém hiệu quả,
+   điều hòa vừa làm mát vừa hút ẩm là đủ. Khi độ ẩm giảm, chuyển sang kết hợp.
+4. Phòng trống → hệ thống tự xử lý (không hỏi bạn).
+5. Tránh bật/tắt liên tục: nếu trạng thái hiện tại vẫn đạt tiện nghi và chênh lệch điện nhỏ, giữ nguyên.
+   Máy nén điều hòa không nên bật/tắt quá thường xuyên.
+6. Khi phòng còn nóng hơn nhiệt độ đặt nhiều (vừa bật điều hòa), có thể bật hết quạt cho mát nhanh.
 
-ĐẦU RA
-Chỉ trả về MỘT object JSON, không giải thích thêm:
-{{"fan_level": <0-3>, "ac_on": <true|false>, "ac_temp": <{ac_min}-{ac_max}>, "ai_reason": "<lý do>"}}
-ai_reason: tiếng Việt có dấu, 1–2 câu, tối đa 200 ký tự, nêu số người, nhiệt độ/độ ẩm và hành động đã chọn.
+CÁCH CHỌN
+- Thường chọn "phương án đề xuất" của bộ tính toán. Chỉ chọn khác khi có lý do rõ ràng
+  (ví dụ: tránh bật/tắt liên tục, đông người, xu hướng nhiệt độ) và nêu lý do đó.
+- Không chọn phương án có nhiệt độ cảm nhận vượt ngưỡng tiện nghi nếu còn phương án đạt.
 
-VÍ DỤ
-- 0 người, 30°C, 65% → {{"fan_level": 0, "ac_on": false, "ac_temp": 26, "ai_reason": "Phòng trống, 30°C → tắt quạt và điều hòa để tiết kiệm điện."}}
-- 2 người, 26.5°C, 60% → {{"fan_level": 1, "ac_on": false, "ac_temp": 26, "ai_reason": "2 người, 26.5°C dễ chịu → chỉ cần quạt mức 1."}}
-- 5 người, 30°C, 75% → {{"fan_level": 2, "ac_on": true, "ac_temp": 25, "ai_reason": "5 người, 30°C, ẩm 75% khá oi → bật điều hòa 25°C kèm quạt mức 2."}}
+ĐẦU RA — chỉ MỘT object JSON:
+{{"fan_count": <0-{max_fans}>, "ac_on": <true|false>, "ac_temp": <{ac_min}-{ac_max}>, "ai_reason": "<lý do>"}}
+ai_reason: tiếng Việt có dấu, tối đa 200 ký tự, nêu số người, nhiệt độ/độ ẩm, chế độ đã chọn
+(chỉ quạt / kết hợp / chỉ điều hòa / tắt) và vì sao tiết kiệm điện.
 """
 
 RESPONSE_SCHEMA = {
     "type": "OBJECT",
     "properties": {
-        "fan_level": {"type": "INTEGER", "description": "Mức quạt 0-3 (0 = tắt)"},
+        "fan_count": {"type": "INTEGER", "description": "Số quạt bật, 0-3"},
         "ac_on": {"type": "BOOLEAN", "description": "Bật điều hòa hay không"},
         "ac_temp": {"type": "INTEGER", "description": "Nhiệt độ đặt điều hòa (°C)"},
         "ai_reason": {"type": "STRING", "description": "Lý do ngắn gọn bằng tiếng Việt"},
     },
-    "required": ["fan_level", "ac_on", "ac_temp", "ai_reason"],
-    "propertyOrdering": ["fan_level", "ac_on", "ac_temp", "ai_reason"],
+    "required": ["fan_count", "ac_on", "ac_temp", "ai_reason"],
+    "propertyOrdering": ["fan_count", "ac_on", "ac_temp", "ai_reason"],
 }
 
 
-def build_system_prompt(ac_min: int, ac_max: int) -> str:
-    return SYSTEM_PROMPT_TEMPLATE.format(ac_min=ac_min, ac_max=ac_max)
+def describe_devices(cfg) -> str:
+    """Mô tả thiết bị theo hồ sơ (DeviceProfile → PlannerConfig) để đưa vào prompt."""
+    lines = []
+    for i, (power, ok) in enumerate(zip(cfg.fan_powers, cfg.fans_available), start=1):
+        lines.append(f"- Quạt {i}: ~{power:.0f} W, chỉ bật/tắt." if ok else f"- Quạt {i}: KHÔNG dùng được.")
+    if cfg.ac_available:
+        lines.append(f"- 1 điều hòa: ac_on true/false, ac_temp là nhiệt độ đặt, số nguyên "
+                     f"{cfg.ac_min_temp}–{cfg.ac_set_max}°C. Tốn ~{cfg.ac_power_w:.0f} W khi đặt 24°C; "
+                     f"mỗi 1°C đặt cao hơn giảm khoảng {cfg.ac_saving_per_degree * 100:.0f}% điện.")
+    else:
+        lines.append("- Phòng KHÔNG có điều hòa dùng được: luôn trả ac_on=false.")
+    return "\n".join(lines)
+
+
+def build_system_prompt(cfg) -> str:
+    return SYSTEM_PROMPT_TEMPLATE.format(
+        devices=describe_devices(cfg),
+        max_fans=cfg.max_fans,
+        comfort=cfg.comfort_max,
+        ac_min=cfg.ac_min_temp,
+        ac_max=cfg.ac_set_max,
+        humid=cfg.humid_rh,
+    )
 
 
 def _age_text(seconds: Optional[float]) -> str:
@@ -61,40 +86,46 @@ def _age_text(seconds: Optional[float]) -> str:
 
 def build_user_prompt(
     *,
-    people_count: Optional[int],
+    people_count: int,
     people_age: Optional[float],
-    people_source: str,
     temperature: float,
     humidity: Optional[float],
-    sensor_age: Optional[float],
-    fan_level: int,
-    ac_on: bool,
-    ac_temp: int,
+    feels_like: float,
+    current: dict,
+    options: list,
+    recommended,
+    notes: list[str],
     last_reason: Optional[str],
     now: Optional[datetime] = None,
 ) -> str:
     now = now or datetime.now()
-    if people_count is None:
-        people_line = f"KHÔNG RÕ (dữ liệu camera đã cũ, cập nhật {_age_text(people_age)})"
-    else:
-        people_line = f"{people_count} người (nguồn {people_source}, cập nhật {_age_text(people_age)})"
-
     humidity_line = f"{humidity:.0f}%" if humidity is not None else "không có dữ liệu"
-    ac_line = f"BẬT, đặt {ac_temp}°C" if ac_on else f"TẮT (giá trị đặt {ac_temp}°C)"
-    fan_line = "TẮT" if fan_level == 0 else f"mức {fan_level}"
+    ac_line = f"BẬT, đặt {current['ac_temp']}°C" if current["ac_on"] else "TẮT"
 
     lines = [
         "DỮ LIỆU HIỆN TẠI",
         f"- Thời gian: {now:%H:%M} ngày {now:%d/%m/%Y}",
-        f"- Số người trong phòng: {people_line}",
-        f"- Nhiệt độ phòng (DHT11): {temperature:.1f}°C",
-        f"- Độ ẩm phòng (DHT11): {humidity_line} (cảm biến cập nhật {_age_text(sensor_age)})",
-        "",
-        "TRẠNG THÁI THIẾT BỊ HIỆN TẠI",
-        f"- Quạt: {fan_line}",
-        f"- Điều hòa: {ac_line}",
+        f"- Số người: {people_count} (camera cập nhật {_age_text(people_age)})",
+        f"- Nhiệt độ phòng: {temperature:.1f}°C, độ ẩm: {humidity_line}",
+        f"- Nhiệt độ cảm nhận khi không quạt/không điều hòa: ~{feels_like:.1f}°C",
+        f"- Đang chạy: {current['fan_count']} quạt, điều hòa {ac_line}",
     ]
     if last_reason:
-        lines.append(f"- Lý do của quyết định trước: {last_reason}")
-    lines += ["", "Hãy đưa ra cấu hình quạt và điều hòa phù hợp (JSON)."]
+        lines.append(f"- Lý do lần trước: {last_reason}")
+
+    lines += ["", "BẢNG PHƯƠNG ÁN (bộ tính toán ước lượng ở trạng thái ổn định)",
+              "| số quạt (quạt nào) | điều hòa | cảm nhận | công suất | đạt tiện nghi |",
+              "|---|---|---|---|---|"]
+    for o in sorted(options, key=lambda o: o.power_w):
+        ac = f"{o.ac_temp}°C" if o.ac_on else "tắt"
+        fans = ", ".join(str(i + 1) for i, f in enumerate(o.fan_set) if f) or "—"
+        lines.append(f"| {o.fans} ({fans}) | {ac} | {o.feels_like:.1f}°C | {o.power_w:.0f} W | "
+                     f"{'có' if o.comfortable else 'không'} |")
+
+    ac_rec = f"điều hòa {recommended.ac_temp}°C" if recommended.ac_on else "tắt điều hòa"
+    lines += ["", f"PHƯƠNG ÁN ĐỀ XUẤT: {recommended.fans} quạt + {ac_rec} "
+                  f"({recommended.label}, ~{recommended.power_w:.0f} W)"]
+    for note in notes:
+        lines.append(f"- Lưu ý: {note}")
+    lines += ["", "Hãy chọn cấu hình cuối cùng (JSON)."]
     return "\n".join(lines)

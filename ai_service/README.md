@@ -1,119 +1,176 @@
-# AI Service — YOLO đếm người + Gemini ra lệnh điều khiển
+# AI Service — YOLO đếm người + Gemini điều khiển 3 quạt & điều hòa (backend v4)
 
-Service Python chạy **riêng** với backend, giao tiếp hoàn toàn qua các API đã có trong `backend/api.md`
-(mục 3, 3b, 6). Không sửa code backend, không cần biết IP của ESP32.
+Service Python chạy **riêng** với backend, chỉ giao tiếp qua API (`backend/api.md`):
 
 ```
-                 ┌──────────────────── ai_service ─────────────────────┐
-ESP32-CAM ──JPEG──► [1] people_counter.py                               │
- /capture        │   YOLO (class person) → trung vị 5 khung            │
-                 │   └── POST /api/people/count {count, "YOLO"} ───────┼──► BACKEND
-                 │                                                     │     │ device_state
-                 │ [2] decision_engine.py (mỗi 5s)                     │     │ sensor_logs ◄── ESP32 (DHT11)
-                 │   GET /api/ai/context  ◄────────────────────────────┼─────┘
-                 │   có thay đổi đáng kể? → prompt → Gemini → JSON      │
-                 │   kiểm tra/kẹp giá trị (lỗi → luật ngưỡng dự phòng)  │
-                 │   └── POST /api/ai/command {fan, ac, temp, reason} ─┼──► BACKEND → ESP32 poll 2s → LED/LCD
-                 └─────────────────────────────────────────────────────┘
+ESP32-CAM ──JPEG──► [1] people_counter.py: YOLO → trung vị 5 khung → POST /api/people/count ─► BACKEND
+                                                                                                  │
+                    [2] decision_engine.py (mỗi 5s)                                               │
+                        GET /api/ai/context ◄──────────────────────────────────────────────────────┤ ◄── ESP32 (DHT11)
+                        rules.plan(): tính 8 phương án (0–3 quạt × AC bật/tắt) → rẻ nhất mà đủ mát │
+                        Gemini đọc bảng phương án + bối cảnh → chọn & viết lý do                   │
+                        ràng buộc vận hành (máy nén AC, phòng trống, chống bật/tắt liên tục)       │
+                        POST /api/ai/command {fan1, fan2, fan3, ac_on, ac_temp, ai_reason} ───────►│ → ESP32 poll 2s → LED/LCD
 ```
 
 ## Cấu trúc
 
 | File | Vai trò |
 |---|---|
-| `main.py` | Chạy 2 chức năng song song (2 luồng), tham số dòng lệnh |
-| `people_counter.py` | **Chức năng 1** — lấy ảnh, YOLO đếm người, làm mượt, gửi backend |
-| `decision_engine.py` | **Chức năng 2** — đọc context, quyết định khi nào gọi LLM, kiểm tra kết quả, gửi lệnh |
-| `llm_client.py` | Gọi Gemini REST `generateContent`, ép trả JSON theo schema, đổi model khi hết quota |
-| `prompts.py` | System prompt (nguyên tắc điều khiển + ví dụ) và prompt dữ liệu |
-| `rules.py` | Luật ngưỡng dự phòng (nhiệt độ cảm nhận theo độ ẩm và số người) |
-| `backend_client.py` | Gọi API backend (`/api/people/count`, `/api/ai/context`, `/api/ai/command`, snapshot) |
-| `config.py`, `.env.example` | Cấu hình |
-| `tests/` | Unit test + backend giả lập để test không cần SQL Server |
+| `main.py` | Chạy 2 chức năng song song, tham số dòng lệnh |
+| `people_counter.py` | **Chức năng 1** — lấy ảnh, YOLO đếm người, lọc trung vị, gửi backend |
+| `rules.py` | **Bộ lập kế hoạch tiện nghi – năng lượng**: mô hình nhiệt độ cảm nhận, hiệu ứng quạt, công suất; chọn tập quạt + AC |
+| `device_profile.py` | **Hồ sơ thiết bị & sở thích** (công suất từng quạt, quạt/AC nào có, nhiệt độ mong muốn): mặc định → `.env` → backend |
+| `decision_engine.py` | **Chức năng 2** — khi nào quyết định, hỏi Gemini, kiểm tra kết quả, ràng buộc vận hành, gửi lệnh |
+| `prompts.py` | System prompt (chiến lược) + prompt dữ liệu kèm bảng phương án |
+| `llm_client.py` | Gọi Gemini REST, ép JSON theo schema, đổi model khi lỗi/hết quota |
+| `backend_client.py` | Gọi API backend (contract v4) |
+| `docs/device_config_schema.json` | Mô tả các trường hồ sơ thiết bị (kiểu, mặc định, khoảng, nhãn, gợi ý) cho backend/Flutter làm form nhập |
+| `docs/backend_ai_v4.patch` | Bản vá cho backend: `/api/ai/context`, `/api/ai/command`, `ai_engine.py` sang `fan1/fan2/fan3` |
+| `tests/` | Unit test, backend giả v4 + Gemini giả, kịch bản end-to-end |
 
-## Cài đặt (Windows, conda env `IOT` như backend)
+## Cài đặt & chạy
 
 ```powershell
 cd IOT_SmartRoom\ai_service
-conda activate IOT                 # hoặc: python -m venv venv; venv\Scripts\activate
-# Có GPU NVIDIA thì cài torch bản CUDA trước (xem pytorch.org), không có thì bỏ qua
 pip install -r requirements.txt
-copy .env.example .env             # rồi mở .env điền các giá trị
+copy .env.example .env      # điền BACKEND_URL, GEMINI_API_KEY, CAM_IP (+ API key nếu backend có đặt)
+python main.py              # cả 2 chức năng
+python main.py --only counter --show          # chỉ đếm người, xem khung hình
+python main.py --only llm --once --dry-run    # ra 1 quyết định, không gửi
 ```
 
-Các giá trị bắt buộc trong `.env`:
+**Điều kiện phía backend**
 
-- `BACKEND_URL` — IP laptop chạy backend, ví dụ `http://10.18.2.49:8006`.
-- `GEMINI_API_KEY` — lấy miễn phí tại <https://aistudio.google.com/apikey>.
-- `CAMERA_SOURCE` + `CAM_IP` — `esp32` nếu máy chạy AI cùng mạng với ESP32-CAM;
-  `backend` nếu AI ở mạng khác (lấy ảnh qua `/api/camera/snapshot` của backend).
-- `PEOPLE_API_KEY`, `AI_API_KEY` — chỉ khi `.env` của backend có đặt.
+1. `backend/.env` có `AI_ENGINE_ENABLED=false`.
+2. Backend v4 phải sửa phần AI sang 3 quạt (hiện `/api/ai/context` trả 500, `/api/ai/command` lỗi).
+   Bản vá sẵn: `git apply ai_service/docs/backend_ai_v4.patch` (đã chạy thử với backend thật trên SQLite).
+3. Thiết bị phải ở chế độ **AUTO** (mặc định là MANUAL).
 
-**Phía backend** phải đặt `AI_ENGINE_ENABLED=false` trong `backend/.env` rồi khởi động lại,
-nếu không AI nội bộ (bảng ngưỡng cũ) sẽ ghi đè quyết định của Gemini.
+---
 
-## Chạy
+## Chiến lược: khi nào chỉ quạt, chỉ điều hòa, hay kết hợp?
 
-```powershell
-python main.py                               # chạy cả 2 chức năng
-python main.py --only counter --show         # chỉ đếm người, mở cửa sổ xem bounding box (q để thoát)
-python main.py --only llm                    # chỉ ra quyết định (số người lấy từ backend)
-python main.py --source webcam:0 --only counter --show --dry-run   # test bằng webcam, không gửi gì
-python main.py --only llm --once --dry-run   # gọi Gemini 1 lần, in quyết định, không gửi lệnh
+### Ý tưởng
+
+Bài toán tối ưu nhỏ có ràng buộc, giải bằng cách thử hết 8 phương án (0–3 quạt × AC bật/tắt,
+mỗi phương án có AC thì chọn nhiệt độ đặt **cao nhất** vẫn đủ mát):
+
+> **chọn** (số quạt *n*, AC bật/tắt, nhiệt độ đặt *Tset*)
+> **sao cho** nhiệt độ cảm nhận ≤ `COMFORT_MAX_TEMP` (26°C)
+> **và** công suất ước tính nhỏ nhất.
+
+### Mô hình (đơn giản, giải thích được, mọi hệ số chỉnh trong `.env`)
+
+| Thành phần | Công thức / giá trị mặc định | Cơ sở |
+|---|---|---|
+| Nhiệt độ cảm nhận (không AC) | `T + phạt_ẩm(RH) + phạt_đông(N) − hiệu_ứng_quạt(n, RH)` | |
+| Phạt độ ẩm | `0.075 × (RH − 60)` khi RH > 60%, tối đa +1.9°C | Độ ẩm cao làm mồ hôi khó bay hơi, thấy oi hơn |
+| Phạt đông người | `0.25°C × (N − 2)`, tối đa +1.5°C | Mỗi người toả ~70–100 W nhiệt |
+| Hiệu ứng làm mát của quạt | 1 quạt 1.5°C, 2 quạt 2.5°C, 3 quạt 3.0°C; ×0.75 khi RH ≥ 70%, ×0.5 khi RH ≥ 80% | ASHRAE 55 cho phép bù tới ~3°C bằng tốc độ gió; gió kém hiệu quả khi ẩm |
+| Khi bật AC | `Tset + phạt_đông − hiệu_ứng_quạt` (AC hút ẩm nên bỏ phạt ẩm) | |
+| Công suất quạt | 45 W/quạt (`FAN_POWER_W`) | Quạt đứng/trần phổ biến 40–75 W |
+| Công suất AC | 900 W ở 24°C, giảm 6%/°C đặt cao hơn (`AC_POWER_W`, `AC_SAVING_PER_DEGREE`) | Máy ~1 HP; các khuyến nghị tiết kiệm điện thường nêu 3–10%/°C |
+
+### Ba vùng hoạt động (kết quả của mô hình)
+
+| Vùng | Khi nào | Lý do tiết kiệm |
+|---|---|---|
+| **Chỉ quạt** | Phần "thiếu tiện nghi" ≤ hiệu ứng tối đa của quạt. Ví dụ 2 người: RH 60% → trên 26°C đến 29°C (1→3 quạt); RH 72% → tới ~27.3°C | Quạt ~45 W, chỉ ~5% điện của AC; dùng **ít quạt nhất** đủ mát |
+| **Kết hợp** | Quạt không đủ: nóng hơn (> 29°C khi RH 60%, > ~27.3°C khi RH 72%) hoặc đông người | Mỗi quạt cho phép nâng Tset ~1–1.5°C (≈ 55–80 W điện AC) > 45 W điện quạt → AC 27–28°C + 1–3 quạt rẻ hơn AC 25°C một mình |
+| **Chỉ điều hòa** | Rất ẩm (RH ≥ 80%) và quạt không đủ, ví dụ nồm ẩm 26–28°C | Gió quạt chỉ còn ½ hiệu quả, không bù được điện quạt; AC vừa làm mát vừa hút ẩm. Khi AC hút ẩm xuống < 80% → tự chuyển sang **kết hợp** và nâng Tset |
+
+Bảng tham khảo (2 người, phòng đang tắt hết; công suất ở trạng thái ổn định):
+
+| Nhiệt độ | Độ ẩm | Quyết định | Công suất ước tính | "Chỉ AC 25°C" |
+|---|---|---|---|---|
+| 25.5°C | 60% | tắt hết | 0 W | 0 W |
+| 27.0°C | 60% | 1 quạt | 45 W | 846 W |
+| 28.5°C | 60% | 2 quạt | 90 W | 846 W |
+| 29.0°C | 60% | 3 quạt | 135 W | 846 W |
+| 30.0°C | 60% | 2 quạt + AC 28°C (ổn định) | 774 W | 846 W |
+| 28.0°C | 72% | 1 quạt + AC 27°C | 783 W | 846 W |
+| 26.0–27.0°C | 82% | chỉ AC 26°C | 792 W | 846 W |
+
+### Hồ sơ thiết bị — chuẩn bị cho chức năng người dùng tự nhập
+
+Mọi thông số **phụ thuộc phòng/thiết bị** được gom vào `device_profile.py`, có sẵn giá trị mặc định nên chạy được
+ngay. Sau này backend/Flutter chỉ cần trả thêm khối `config` trong `GET /api/ai/context`, **ai_service không phải sửa code**:
+
+```
+mặc định trong code  →  .env của ai_service  →  backend /api/ai/context "config"   (lớp sau ghi đè lớp trước, từng trường)
 ```
 
-Lần đầu chạy, Ultralytics tự tải `yolo11n.pt` (~5 MB).
+| Trường | Mặc định | Khoảng hợp lệ | Ý nghĩa |
+|---|---|---|---|
+| `fan_power_w` | `[45, 45, 45]` W | 5–300 W mỗi quạt | Công suất điện từng quạt (1 số = cả 3 quạt) |
+| `fans_available` | `[true, true, true]` | — | Quạt nào dùng được (quạt hỏng → không bao giờ bật) |
+| `ac_available` | `true` | — | Phòng có điều hòa không (không → chỉ dùng quạt) |
+| `ac_power_w` | `900` W | 200–4000 W | Công suất **điện** của điều hòa (mục Input trên nhãn, không phải BTU) |
+| `comfort_max_temp` | `26.0` °C | 23–29 °C | Nhiệt độ cảm nhận tối đa mong muốn |
+| `ac_set_min` / `ac_set_max` | `20` / `28` °C | 16–32 °C | Khoảng nhiệt độ đặt điều hòa cho phép |
 
-## Chức năng 1 — đếm người bằng YOLO
+Ví dụ backend trả (khi đã làm chức năng nhập):
+```json
+GET /api/ai/context → { ..., "config": { "fan_power_w": [45, 40, 70], "ac_power_w": 1200, "comfort_max_temp": 26.5 } }
+```
+- Chỉ cần gửi các trường người dùng đã nhập; trường thiếu dùng giá trị `.env`/mặc định.
+- Giá trị sai kiểu hoặc ngoài khoảng bị bỏ qua (ghi cảnh báo), không làm dừng service.
+- Đổi cấu hình → ai_service áp dụng ngay ở vòng kế tiếp (không cần khởi động lại) và quyết định lại.
+- Mô tả đầy đủ cho form nhập: `docs/device_config_schema.json` (hoặc chạy `python device_profile.py`).
 
-- Model mặc định `yolo11n.pt` (bản nano, chạy CPU khoảng 50–150 ms/ảnh). Cần chính xác hơn thì dùng `yolo11s.pt`.
-- Chỉ lấy class `0 = person` (COCO), ngưỡng `YOLO_CONF=0.40`.
-- **Làm mượt**: lấy trung vị 5 lần đếm gần nhất, nên 1 khung bị bỏ sót / nhận nhầm không làm số người nhảy lung tung
-  (tránh LLM bật/tắt thiết bị liên tục).
-- Chỉ gửi backend khi số người thay đổi, cộng thêm "heartbeat" mỗi 10s để `people_updated_at` luôn mới.
-- Camera lỗi liên tiếp → **không gửi số cũ**; `people_updated_at` cũ dần và bộ quyết định sẽ coi số người là "không rõ".
-- ESP32-CAM trong sketch đang để độ phân giải QVGA (320×240); người ở xa sẽ khó nhận. Nên tăng lên VGA/SVGA
-  trên trang web của CAM (`http://<CAM_IP>`) nếu Wi-Fi đủ khoẻ.
+Planner tận dụng hồ sơ này: chọn **quạt cụ thể** tốn ít điện nhất (rồi ít bật/tắt nhất), bỏ qua quạt hỏng;
+phòng không có AC → chỉ dùng quạt (không đủ mát thì bật hết quạt khả dụng); không có quạt → chỉ dùng AC.
+Công suất AC ảnh hưởng trực tiếp tới vùng "kết hợp" / "chỉ AC": AC càng tốn điện, kết hợp quạt càng có lợi
+(ví dụ 30°C, 60%: AC 2000 W → kết hợp quạt; AC inverter ~300 W → chỉ AC là rẻ nhất).
 
-## Chức năng 2 — LLM phân tích và ra lệnh
+### Ràng buộc vận hành (để chạy thật ổn định)
 
-1. Mỗi 5s đọc `GET /api/ai/context`. Bỏ qua nếu mode ≠ `AUTO` hoặc cảm biến cũ hơn 60s.
-2. Chỉ gọi Gemini khi **có thay đổi đáng kể**: số người đổi, nhiệt độ lệch ≥ 0.5°C, độ ẩm lệch ≥ 5%,
-   trạng thái thiết bị bị đổi, vừa chuyển sang AUTO, hoặc đã 2 phút chưa đánh giá lại.
-   Hai lần gọi cách nhau tối thiểu 10s → vừa với giới hạn của gói miễn phí.
-3. Prompt gồm: nguyên tắc (tiện nghi 24–27°C, ưu tiên quạt vì tiết kiệm điện, chỉ bật AC khi nóng/ẩm/đông người,
-   tránh bật tắt liên tục, phòng trống thì tắt hết…), 3 ví dụ mẫu, và dữ liệu hiện tại (số người + độ mới,
-   nhiệt độ, độ ẩm, trạng thái quạt/AC, lý do lần trước).
-4. Gemini bắt buộc trả JSON theo schema `{fan_level, ac_on, ac_temp, ai_reason}`.
-5. **Kiểm tra đầu ra**: ép kiểu, kẹp `fan_level` 0–3, `ac_temp` trong `AC_MIN_TEMP`–`AC_MAX_TEMP` (20–30°C);
-   guardrail: phòng chắc chắn trống → luôn tắt hết.
-6. Gửi `POST /api/ai/command`. `ai_reason` có tiền tố `[Gemini]` hoặc `[Luật dự phòng]` để Dashboard và trang lịch sử
-   cho biết quyết định đến từ đâu.
+- **Biên trễ 0.5°C** (`HYSTERESIS`): phương án làm phòng ấm hơn hiện tại phải mát hơn ngưỡng 0.5°C mới được chọn
+  → không bật/tắt liên tục khi nhiệt độ dao động (DHT11 sai số ±2°C, ±5%).
+- **Nhiệt độ "tự nhiên"**: khi AC chạy, nhiệt độ/độ ẩm đo được đã bị AC kéo xuống. Hệ thống nhớ nhiệt độ & độ ẩm
+  lúc trước khi bật AC để đánh giá "tắt AC, chỉ dùng quạt có đủ không"; không biết thì chỉ tắt AC khi phòng mát hơn
+  Tset ≥ 1°C (`AC_OFF_MARGIN`). Tránh vòng lặp AC làm mát → tắt AC → nóng lại → bật AC.
+- **Bảo vệ máy nén**: AC bật ít nhất 10 phút mới tắt, tắt ít nhất 5 phút mới bật lại
+  (`AC_MIN_ON_SECONDS`, `AC_MIN_OFF_SECONDS`); trong lúc chờ bật lại thì dùng 3 quạt.
+- **Làm mát nhanh**: vừa bật AC mà phòng nóng hơn Tset ≥ 2°C → bật hết quạt khả dụng cho mát ngay (trừ khi rất ẩm).
+- **Phòng trống**: tắt quạt ngay; AC giữ thêm 3 phút ở 28°C rồi mới tắt (`EMPTY_AC_GRACE_SECONDS`) vì người có thể
+  quay lại, khởi động lại máy nén tốn hơn. Không gọi Gemini khi phòng trống (tiết kiệm quota).
+- **Không gọi Gemini khi không cần**: nếu chỉ là đánh giá định kỳ / nhiệt độ, độ ẩm đổi nhẹ mà planner xác nhận
+  trạng thái hiện tại vẫn tối ưu → giữ nguyên, không gọi Gemini, không gửi lệnh (tiết kiệm quota, giảm độ trễ).
 
-**Dự phòng**: Gemini lỗi mạng, hết quota (HTTP 429), sai key, trả JSON hỏng → thử model tiếp theo trong
-`GEMINI_MODELS` → vẫn lỗi thì dùng `rules.py`. Nếu số người "không rõ" và Gemini không khả dụng → giữ nguyên trạng thái.
+### Vai trò của Gemini
 
-Mỗi quyết định được ghi vào `logs/decisions.jsonl` (đầu vào, nguồn quyết định, model, độ trễ, lỗi) —
-dùng để thống kê trong báo cáo (tỉ lệ Gemini/luật, thời gian phản hồi…).
+Planner tính sẵn bảng 8 phương án (cảm nhận, công suất, đạt tiện nghi hay không) và phương án đề xuất.
+Gemini đọc bảng cùng bối cảnh (số người, xu hướng, lý do lần trước, ràng buộc máy nén), chọn cấu hình cuối và viết
+lý do tiếng Việt cho Dashboard. Gemini được phép chọn khác planner nhưng **không được** chọn phương án làm phòng nóng
+hơn ngưỡng > 1°C khi còn phương án đạt (comfort guard). Gemini lỗi → dùng phương án planner (`[Luật dự phòng]`).
+
+Mỗi quyết định ghi vào `logs/decisions.jsonl`: phương án planner, quyết định cuối, công suất ước tính và công suất
+nếu "chỉ bật AC 25°C" → dùng để thống kê mức tiết kiệm trong báo cáo.
+
+### Giới hạn
+
+- Các hệ số là **ước lượng** (không đo công suất thật); công suất thiết bị nên lấy từ nhãn (hồ sơ thiết bị),
+  `FAN_COOLING_EFFECT` chỉnh theo cảm nhận thực tế của nhóm.
+- Không có cảm biến nhiệt độ ngoài trời, nên chưa dự báo được tải lạnh; không biết vị trí người so với từng quạt
+  (có thể mở rộng: dùng toạ độ bounding box YOLO để chọn quạt gần người).
+
+---
 
 ## Test
 
 ```powershell
-python tests/test_logic.py                   # 16 unit test, không cần camera/Gemini/backend
+python tests/test_logic.py      # 30 unit test (planner 3 vùng, hồ sơ thiết bị, trễ, máy nén, phòng trống, Gemini...)
 
-# Test end-to-end với backend giả lập (không cần SQL Server):
+# End-to-end với backend giả v4 + Gemini giả (không cần SQL Server):
 set MOCK_SNAPSHOT=duong_dan_anh_co_nguoi.jpg
 uvicorn tests.mock_backend:app --port 8006
-# cửa sổ khác:
-python tests/e2e_scenario.py                # 7 bước: YOLO thật + Gemini giả (hết quota, đổi model…), AUTO/MANUAL
-# hoặc chạy service thật trỏ vào backend giả:  python main.py --source backend -v
-# xem kết quả: http://localhost:8006/test/state
+python tests/e2e_scenario.py    # chỉ quạt → kết hợp → chỉ AC → comfort guard → hồ sơ mới từ backend → phòng trống → MANUAL
 ```
 
 ## Lưu ý
 
-- Thời gian `people_updated_at` / `sensor_timestamp` là giờ local của backend (không có múi giờ):
-  máy chạy AI và máy chạy backend phải cùng múi giờ, đồng hồ đúng.
-- Tên model Gemini thay đổi theo thời gian; nếu báo `HTTP 404 không có model`, sửa `GEMINI_MODELS`
-  theo danh sách tại <https://ai.google.dev/gemini-api/docs/models>.
-- Giới hạn request miễn phí xem trong AI Studio (giới hạn tính theo project, quota ngày reset lúc 0h giờ Thái Bình Dương).
+- Thời gian `people_updated_at` / `sensor_timestamp` là giờ local của backend: máy AI và backend cùng múi giờ.
+- Tên model Gemini thay đổi theo thời gian; lỗi `HTTP 404 không có model` thì sửa `GEMINI_MODELS`
+  (danh sách: <https://ai.google.dev/gemini-api/docs/models>).

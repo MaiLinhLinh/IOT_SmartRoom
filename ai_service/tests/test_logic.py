@@ -10,31 +10,112 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import Settings  # noqa: E402
-from decision_engine import DecisionEngine, validate_decision  # noqa: E402
+from decision_engine import DecisionEngine, parse_fans, validate_decision  # noqa: E402
+import device_profile  # noqa: E402
 from llm_client import GeminiClient, LLMError, extract_json  # noqa: E402
 from people_counter import CountSmoother  # noqa: E402
-from rules import rule_decision  # noqa: E402
+import rules  # noqa: E402
+
+CFG = rules.PlannerConfig()
+OFF = {"fan_count": 0, "ac_on": False, "ac_temp": 26}
 
 
-# ---------------- rules ----------------
-def test_rules_empty_room_turns_off():
-    d = rule_decision(32, 70, 0, {"ac_temp": 26})
-    assert d["fan_level"] == 0 and d["ac_on"] is False
+def _plan(t, rh, n, current=OFF, natural=None):
+    best, steady, _ = rules.plan(t, rh, n, current, CFG, natural)
+    return best, steady
 
 
-def test_rules_unknown_people_keeps_state():
-    assert rule_decision(32, 70, None, {"ac_temp": 26}) is None
+# ---------------- planner: 3 vùng chỉ quạt / kết hợp / chỉ điều hòa ----------------
+def test_comfortable_room_all_off():
+    best, _ = _plan(25.5, 60, 2)
+    assert (best.fans, best.ac_on) == (0, False)
 
 
-def test_rules_levels():
-    assert rule_decision(24, 50, 2, {})["fan_level"] == 0
-    assert rule_decision(26, 50, 2, {})["fan_level"] == 1
-    hot = rule_decision(29.5, 50, 2, {})
-    assert hot["fan_level"] == 2 and hot["ac_on"] is True
-    very_hot = rule_decision(32, 50, 2, {})
-    assert very_hot["fan_level"] == 3 and very_hot["ac_on"] is True
-    # 27.5°C nhưng độ ẩm 75% → cảm nhận 28.5 → bật AC
-    assert rule_decision(27.5, 75, 2, {})["ac_on"] is True
+def test_fan_only_zone_uses_fewest_fans():
+    for t, n in [(27.0, 1), (28.5, 2), (29.0, 3)]:
+        best = _plan(t, 60, 2)[0]
+        assert (best.fans, best.ac_on, best.label) == (n, False, "chỉ quạt")
+
+
+def test_combined_zone_raises_setpoint_with_fans():
+    _, steady = _plan(30.0, 60, 2)
+    assert steady.label == "kết hợp" and steady.ac_temp >= 27 and steady.fans >= 1
+    assert steady.power_w < rules.baseline_power(30.0, 60, 2, CFG)  # rẻ hơn "chỉ AC 25°C"
+
+
+def test_ac_only_zone_when_very_humid():
+    _, steady = _plan(27.0, 82, 2)
+    assert steady.label == "chỉ điều hòa"
+
+
+def test_pulldown_boosts_fans_when_room_far_above_setpoint():
+    best, steady = _plan(31.0, 60, 2)
+    assert best.label == "làm mát nhanh" and best.fans == 3 and steady.fans < 3
+
+
+def test_ac_running_not_turned_off_without_natural_temp():
+    running = {"fan_count": 1, "ac_on": True, "ac_temp": 27}
+    assert _plan(27.0, 65, 2, running)[0].ac_on is True             # nhiệt độ đo bị AC kéo xuống
+    assert _plan(27.0, 65, 2, running, natural=27.2)[0].ac_on is False  # biết nhiệt độ tự nhiên → tắt được
+    assert _plan(25.8, 65, 2, running)[0].ac_on is False            # phòng mát hơn Tset 1°C → tắt
+
+
+def test_hysteresis_keeps_fan_near_threshold():
+    one_fan = {"fan_count": 1, "ac_on": False, "ac_temp": 26}
+    assert _plan(26.2, 60, 2, one_fan)[0].fans == 1   # chưa giảm đủ 0.5°C dưới ngưỡng → giữ quạt
+    assert _plan(25.4, 60, 2, one_fan)[0].fans == 0
+
+
+def test_select_fans_minimal_toggles():
+    sel = lambda n, cur: rules.select_fans(n, cur, CFG)  # noqa: E731
+    assert sel(2, (False, False, False)) == (True, True, False)
+    assert sel(2, (False, False, True)) == (True, False, True)   # giữ quạt 3 đang chạy
+    assert sel(1, (True, True, True)) == (True, False, False)
+    assert sel(0, (True, False, True)) == (False, False, False)
+
+
+def test_select_fans_prefers_low_power_and_skips_unavailable():
+    cfg = rules.PlannerConfig(fan_powers=(60.0, 30.0, 45.0), fans_available=(True, True, False))
+    assert rules.select_fans(1, (False, False, False), cfg) == (False, True, False)  # quạt 2 rẻ nhất
+    assert rules.select_fans(3, (False, False, False), cfg) == (True, True, False)   # quạt 3 hỏng
+    assert cfg.max_fans == 2
+
+
+def test_room_without_ac_only_uses_fans():
+    cfg = rules.PlannerConfig(ac_available=False)
+    best, _, options = rules.plan(32.0, 70, 4, OFF, cfg)
+    assert not any(o.ac_on for o in options)
+    assert best.fans == 3 and not best.ac_on   # không đủ mát → bật tối đa quạt
+
+
+def test_ac_only_when_no_fans_available():
+    cfg = rules.PlannerConfig(fans_available=(False, False, False))
+    best, _, _ = rules.plan(30.0, 60, 2, OFF, cfg)
+    assert best.ac_on and best.fans == 0
+
+
+def test_higher_ac_power_shifts_toward_fans():
+    # AC tốn điện hơn → kết hợp có lợi hơn; AC rất tiết kiệm → có thể chỉ cần AC
+    big = rules.PlannerConfig(ac_power_w=2000.0)
+    small = rules.PlannerConfig(ac_power_w=300.0)
+    assert rules.plan(30.0, 60, 2, OFF, big)[1].fans >= 1
+    assert rules.plan(30.0, 60, 2, OFF, small)[1].fans == 0
+
+
+# ---------------- hồ sơ thiết bị ----------------
+def test_profile_defaults_env_and_backend_override():
+    p, warn = device_profile.from_env({})
+    assert p.fan_power_w == [45.0] * 3 and p.ac_power_w == 900.0 and not warn
+    p, warn = device_profile.from_env({"FAN_POWER_W": "60", "FANS_AVAILABLE": "1,0,1", "AC_POWER_W": "1200"})
+    assert p.fan_power_w == [60.0] * 3 and p.fans_available == [True, False, True] and p.sources["ac_power_w"] == "env"
+    warn = p.apply({"ac_power_w": 50000, "comfort_max_temp": "27", "unknown": 1, "fan_power_w": [40, 50]}, "backend")
+    assert p.ac_power_w == 1200.0 and p.comfort_max_temp == 27.0 and len(warn) == 2   # ngoài khoảng + sai số lượng
+    assert {f["name"] for f in device_profile.schema()} >= {"fan_power_w", "ac_power_w", "comfort_max_temp"}
+
+
+def test_parse_fans_v4_and_v3():
+    assert parse_fans({"fan1": True, "fan2": False, "fan3": True}) == (True, False, True)
+    assert parse_fans({"fan_level": 2}) == (True, True, False)
 
 
 # ---------------- smoother ----------------
@@ -54,15 +135,17 @@ def test_extract_json_variants():
 
 
 def test_validate_clamps_and_types():
-    d = validate_decision({"fan_level": "5", "ac_on": "true", "ac_temp": 10, "ai_reason": "x"}, 26, 20, 30)
-    assert d == {"fan_level": 3, "ac_on": True, "ac_temp": 20, "ai_reason": "x"}
-    d = validate_decision({"fan_level": 1, "ac_on": False, "ac_temp": 18}, 27, 20, 30)
+    d = validate_decision({"fan_count": "5", "ac_on": "true", "ac_temp": 10, "ai_reason": "x"}, 26, 20, 30)
+    assert d == {"fan_count": 3, "ac_on": True, "ac_temp": 20, "ai_reason": "x"}
+    d = validate_decision({"fan_count": 1, "ac_on": False, "ac_temp": 18}, 27, 20, 30)
     assert d["ac_temp"] == 27 and d["ai_reason"]
+    d = validate_decision({"fan1": True, "fan2": False, "fan3": True, "ac_on": False}, 26, 20, 30)
+    assert d["fan_count"] == 2
 
 
 def test_validate_missing_field():
     try:
-        validate_decision({"fan_level": 1}, 26, 20, 30)
+        validate_decision({"ac_on": True}, 26, 20, 30)
     except ValueError:
         return
     raise AssertionError("phải báo thiếu trường")
@@ -149,73 +232,118 @@ class FakeBackend:
     def get_context(self):
         return dict(self.ctx)
 
-    def send_command(self, fan_level, ac_on, ac_temp, ai_reason):
-        self.sent.append((fan_level, ac_on, ac_temp, ai_reason))
-        self.ctx.update(fan_level=fan_level, ac_on=ac_on, ac_temp=ac_temp, ai_reason=ai_reason)
+    def send_command(self, fans, ac_on, ac_temp, ai_reason):
+        self.sent.append((tuple(fans), ac_on, ac_temp, ai_reason))
+        self.ctx.update(fan1=fans[0], fan2=fans[1], fan3=fans[2], ac_on=ac_on, ac_temp=ac_temp, ai_reason=ai_reason)
         return self.ctx
 
 
 def _ctx(**kw):
     from datetime import datetime
     now = datetime.now().isoformat()
-    base = {"mode": "AUTO", "fan_level": 0, "ac_on": False, "ac_temp": 26, "people_count": 3,
-            "people_source": "YOLO", "people_updated_at": now, "temperature": 30.0, "humidity": 70.0,
-            "sensor_timestamp": now, "ai_reason": None}
+    base = {"mode": "AUTO", "fan1": False, "fan2": False, "fan3": False, "ac_on": False, "ac_temp": 26,
+            "people_count": 2, "people_source": "YOLO", "people_updated_at": now, "temperature": 30.0,
+            "humidity": 60.0, "sensor_timestamp": now, "ai_reason": None}
     base.update(kw)
     return base
 
 
-def _engine(backend, llm=None):
+def _engine(backend, llm=None, **overrides):
     s = Settings()
     s.decision_log_path = ""
     s.llm_min_interval = 0
     s.dry_run = False
+    for k, v in overrides.items():
+        setattr(s, k, v)
     return DecisionEngine(s, backend, llm)
 
 
-def test_engine_falls_back_to_rules_when_llm_fails():
+def _llm(answer):
     llm = mock.Mock()
-    llm.generate_json.side_effect = LLMError("quota")
-    llm.last_model = None
-    be = FakeBackend(_ctx())
-    d = _engine(be, llm).step()
-    assert d.source == "RULE" and be.sent and be.sent[0][3].startswith("[Luật dự phòng]")
-
-
-def test_engine_uses_llm_and_does_not_repeat_without_change():
-    llm = mock.Mock()
-    llm.generate_json.return_value = {"fan_level": 2, "ac_on": True, "ac_temp": 25, "ai_reason": "nóng"}
+    llm.generate_json.return_value = answer
     llm.last_model = "m"
+    llm.models = ["m"]
+    return llm
+
+
+def test_engine_falls_back_to_planner_when_llm_fails():
+    llm = _llm(None)
+    llm.generate_json.side_effect = LLMError("quota")
+    be = FakeBackend(_ctx(temperature=28.5))
+    d = _engine(be, llm).step()
+    assert d.source == "RULE" and be.sent[0][:2] == ((True, True, False), False)
+    assert be.sent[0][3].startswith("[Luật dự phòng]") and "W)" in be.sent[0][3]
+
+
+def test_engine_uses_llm_v4_payload_and_does_not_repeat():
+    llm = _llm({"fan_count": 2, "ac_on": True, "ac_temp": 28, "ai_reason": "kết hợp"})
     be = FakeBackend(_ctx())
     eng = _engine(be, llm)
     assert eng.step().source == "GEMINI"
-    assert be.sent[0][:3] == (2, True, 25) and be.sent[0][3].startswith("[Gemini]")
-    assert eng.step() is None            # không đổi gì → không gọi lại
-    assert llm.generate_json.call_count == 1
-    be.ctx["people_count"] = 6           # số người đổi → gọi lại
+    assert be.sent[0][:3] == ((True, True, False), True, 28) and be.sent[0][3].startswith("[Gemini]")
+    prompt = llm.generate_json.call_args[0][1]
+    assert "BẢNG PHƯƠNG ÁN" in prompt and "PHƯƠNG ÁN ĐỀ XUẤT" in prompt
+    assert eng.step() is None and llm.generate_json.call_count == 1   # không đổi → không gọi lại
+    be.ctx["people_count"] = 6
     eng.step()
     assert llm.generate_json.call_count == 2
 
 
-def test_engine_guardrail_empty_room():
-    llm = mock.Mock()
-    llm.generate_json.return_value = {"fan_level": 1, "ac_on": True, "ac_temp": 26, "ai_reason": "x"}
-    llm.last_model = "m"
-    be = FakeBackend(_ctx(people_count=0, fan_level=2, ac_on=True))
+def test_engine_comfort_guard_overrides_too_hot_choice():
+    llm = _llm({"fan_count": 0, "ac_on": False, "ac_temp": 26, "ai_reason": "tắt hết"})
+    be = FakeBackend(_ctx(temperature=31.0))
     _engine(be, llm).step()
-    assert be.sent[0][:2] == (0, False)
+    assert be.sent[0][1] is True   # vẫn bật AC dù Gemini chọn tắt hết
 
 
-def test_engine_skips_manual_and_stale_sensor():
+def test_engine_empty_room_no_llm_and_ac_grace():
+    llm = _llm({"fan_count": 3, "ac_on": True, "ac_temp": 24, "ai_reason": "x"})
+    be = FakeBackend(_ctx(people_count=0, fan1=True, fan2=True, ac_on=True, ac_temp=26))
+    eng = _engine(be, llm, empty_ac_grace_seconds=180)
+    d = eng.step()
+    assert llm.generate_json.call_count == 0
+    assert d.source == "AUTO" and be.sent[0][:3] == ((False, False, False), True, 28)  # tắt quạt, giữ AC 28°C
+    eng._empty_since -= 200                                                        # giả lập đã trống 200s
+    d = eng.step()
+    assert be.sent[-1][:2] == ((False, False, False), False)
+
+
+def test_engine_ac_min_off_time_uses_fans_instead():
+    llm = _llm({"fan_count": 2, "ac_on": True, "ac_temp": 28, "ai_reason": "bật AC"})
+    be = FakeBackend(_ctx())
+    eng = _engine(be, llm, ac_min_off_seconds=300)
+    eng._last_seen_ac, eng._ac_changed_at = False, __import__("time").monotonic() - 30  # AC vừa tắt 30s
+    eng.step()
+    assert be.sent[0][:2] == ((True, True, True), False)
+
+
+def test_engine_skips_manual_stale_sensor_and_unknown_people():
     be = FakeBackend(_ctx(mode="MANUAL"))
     assert _engine(be).step() is None and not be.sent
     be = FakeBackend(_ctx(sensor_timestamp="2020-01-01T00:00:00"))
     assert _engine(be).step() is None and not be.sent
-
-
-def test_engine_stale_people_keeps_state_with_rules():
-    be = FakeBackend(_ctx(people_updated_at="2020-01-01T00:00:00", fan_level=2))
+    be = FakeBackend(_ctx(people_updated_at="2020-01-01T00:00:00", fan1=True))
     assert _engine(be).step() is None and not be.sent
+
+
+def test_engine_skips_llm_when_state_already_optimal():
+    llm = _llm({"fan_count": 1, "ac_on": False, "ac_temp": 26, "ai_reason": "x"})
+    be = FakeBackend(_ctx(temperature=27.0, fan1=True))   # 1 quạt đang chạy là tối ưu ở 27°C
+    eng = _engine(be, llm)
+    eng._last_inputs = {"people": 2, "temperature": 26.4, "humidity": 60.0,
+                        "device": ((True, False, False), False, 26)}   # nhiệt độ đổi nhẹ
+    assert eng.step() is None and llm.generate_json.call_count == 0 and not be.sent
+
+
+def test_engine_reads_profile_from_backend_config():
+    llm = _llm(None)
+    llm.generate_json.side_effect = LLMError("x")
+    be = FakeBackend(_ctx(temperature=31.0, config={"ac_available": False, "fan_power_w": [50, 40, 70]}))
+    eng = _engine(be, llm)
+    eng.step()
+    assert eng.profile.sources["ac_available"] == "backend"
+    assert be.sent[0][1] is False and be.sent[0][0] == (True, True, True)   # không AC → bật hết quạt
+    assert "không có điều hòa" in eng.system_prompt.lower() or "KHÔNG có điều hòa" in eng.system_prompt
 
 
 if __name__ == "__main__":

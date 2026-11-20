@@ -87,8 +87,23 @@ class Settings:
     humidity_delta: float = field(default_factory=lambda: _float("HUMIDITY_DELTA", 5))
     people_stale_seconds: float = field(default_factory=lambda: _float("PEOPLE_STALE_SECONDS", 60))
     sensor_stale_seconds: float = field(default_factory=lambda: _float("SENSOR_STALE_SECONDS", 60))
-    ac_min_temp: int = field(default_factory=lambda: _int("AC_MIN_TEMP", 20))
-    ac_max_temp: int = field(default_factory=lambda: _int("AC_MAX_TEMP", 30))
+
+    # ---------- Tham số KỸ THUẬT của chiến lược quạt / điều hòa (rules.py) ----------
+    # (Thông số THIẾT BỊ & SỞ THÍCH người dùng — công suất, quạt/AC nào có, nhiệt độ mong muốn —
+    #  nằm ở device_profile.py: mặc định → .env → backend context["config"].)
+    ac_saving_per_degree: float = field(default_factory=lambda: _float("AC_SAVING_PER_DEGREE", 0.06))
+    fan_cooling_effect: list[float] = field(
+        default_factory=lambda: [float(x) for x in _list("FAN_COOLING_EFFECT", "1.5,2.5,3.0")][:3]
+    )
+    humid_rh: float = field(default_factory=lambda: _float("HUMID_RH", 80))
+    hysteresis: float = field(default_factory=lambda: _float("HYSTERESIS", 0.5))
+    pulldown_delta: float = field(default_factory=lambda: _float("PULLDOWN_DELTA", 2.0))
+    ac_off_margin: float = field(default_factory=lambda: _float("AC_OFF_MARGIN", 1.0))
+    baseline_ac_temp: int = field(default_factory=lambda: _int("BASELINE_AC_TEMP", 25))
+    ac_min_on_seconds: float = field(default_factory=lambda: _float("AC_MIN_ON_SECONDS", 600))
+    ac_min_off_seconds: float = field(default_factory=lambda: _float("AC_MIN_OFF_SECONDS", 300))
+    empty_ac_grace_seconds: float = field(default_factory=lambda: _float("EMPTY_AC_GRACE_SECONDS", 180))
+    natural_temp_ttl_seconds: float = field(default_factory=lambda: _float("NATURAL_TEMP_TTL_SECONDS", 1800))
     decision_log_path: str = field(default_factory=lambda: _str("DECISION_LOG_PATH", "logs/decisions.jsonl"))
     dry_run: bool = field(default_factory=lambda: _bool("DRY_RUN", False))
 

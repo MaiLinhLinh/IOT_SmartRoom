@@ -72,9 +72,13 @@ class BackendClient:
         self._raise(resp, "POST /api/people/count")
         return resp.json()
 
-    def send_command(self, fan_level: int, ac_on: bool, ac_temp: int, ai_reason: str) -> dict:
+    def send_command(self, fans: tuple, ac_on: bool, ac_temp: int, ai_reason: str) -> dict:
+        """Backend v4: 3 quạt độc lập fan1/fan2/fan3 (bool)."""
+        f1, f2, f3 = (bool(x) for x in fans)
         body = {
-            "fan_level": int(fan_level),
+            "fan1": f1,
+            "fan2": f2,
+            "fan3": f3,
             "ac_on": bool(ac_on),
             "ac_temp": int(ac_temp),
             "ai_reason": ai_reason[:500],

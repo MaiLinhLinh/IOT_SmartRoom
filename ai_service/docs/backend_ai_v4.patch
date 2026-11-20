@@ -1,0 +1,79 @@
+diff --git a/backend/routers/ai.py b/backend/routers/ai.py
+index 4bdea5e..e608b10 100644
+--- a/backend/routers/ai.py
++++ b/backend/routers/ai.py
+@@ -40,7 +40,9 @@ def get_ai_context(db: Session = Depends(get_db)):
+     latest = db.query(SensorLog).order_by(SensorLog.id.desc()).first()
+     return {
+         "mode": state.mode,
+-        "fan_level": state.fan_level,
++        "fan1": state.fan1,
++        "fan2": state.fan2,
++        "fan3": state.fan3,
+         "ac_on": state.ac_on,
+         "ac_temp": state.ac_temp,
+         "people_count": state.people_count,
+@@ -73,7 +75,9 @@ def ai_command(body: AIDecisionIn, db: Session = Depends(get_db)):
+ 
+     state, _, _ = apply_command(
+         db,
+-        fan_level=body.fan_level,
++        fan1=body.fan1,
++        fan2=body.fan2,
++        fan3=body.fan3,
+         ac_on=body.ac_on,
+         ac_temp=body.ac_temp,
+         mode="AUTO",
+diff --git a/backend/schemas.py b/backend/schemas.py
+index 1b2e1f2..ad1697e 100644
+--- a/backend/schemas.py
++++ b/backend/schemas.py
+@@ -129,8 +129,13 @@ class AIDecisionIn(BaseModel):
+     """
+     POST /api/ai/command — AI service bên ngoài gửi quyết định.
+     Không cần JWT, dùng X-API-Key nếu .env có AI_API_KEY.
++    v4: 3 quạt độc lập, giống DeviceCommandIn.
+     """
+-    fan_level: int  = Field(..., ge=0, le=3)
++    model_config = ConfigDict(extra="forbid")
++
++    fan1:      bool
++    fan2:      bool
++    fan3:      bool
+     ac_on:     bool
+     ac_temp:   int  = Field(default=26, ge=16, le=32)
+     ai_reason: str  = Field(..., min_length=1, max_length=500)
+diff --git a/backend/services/ai_engine.py b/backend/services/ai_engine.py
+index 0a4e1d2..68f160a 100644
+--- a/backend/services/ai_engine.py
++++ b/backend/services/ai_engine.py
+@@ -4,7 +4,7 @@ services/ai_engine.py — AI tự động điều khiển (chế độ AUTO)
+ Nguồn số người: module YOLO chạy riêng đẩy lên POST /api/people/count
+ → backend lưu device_state.people_count → AI engine đọc lại (không tự gọi CAM).
+ 
+-Logic bảng quyết định:
++Logic bảng quyết định (v4: "mức" n = bật n quạt đầu tiên, fan1..fan_n):
+   Không có người : fan=0, AC=OFF
+   T < 25         : fan=0, AC=OFF
+   25 <= T < 28   : fan=1, AC=OFF
+@@ -53,7 +53,8 @@ def build_ai_reason(temperature: float, people_count: int, decision: dict) -> st
+     else:
+         situation = "mát mẻ"
+ 
+-    fan_text = "tắt quạt" if decision["fan_level"] == 0 else f"quạt mức {decision['fan_level']}"
++    n = decision["fan_level"]
++    fan_text = "tắt quạt" if n == 0 else "bật " + ", ".join(f"quạt {i}" for i in range(1, n + 1))
+     ac_text = (
+         f"bật điều hòa {decision['ac_temp']}°C"
+         if decision["ac_on"]
+@@ -93,7 +94,9 @@ async def ai_control_loop():
+ 
+             _, description, changed = apply_command(
+                 db,
+-                fan_level=decision["fan_level"],
++                fan1=decision["fan_level"] >= 1,
++                fan2=decision["fan_level"] >= 2,
++                fan3=decision["fan_level"] >= 3,
+                 ac_on=decision["ac_on"],
+                 ac_temp=decision["ac_temp"],
+                 mode="AUTO",

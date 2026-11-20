@@ -1,15 +1,19 @@
 """
-decision_engine.py — Chức năng 2: gọi LLM (Gemini) phân tích và đưa ra lệnh điều khiển.
+decision_engine.py — Chức năng 2: phân tích bằng LLM (Gemini) và ra lệnh 3 quạt + điều hòa (backend v4).
 
 Mỗi DECISION_CHECK_SECONDS (mặc định 5s):
-  1. GET /api/ai/context  → mode, nhiệt độ, độ ẩm, số người, trạng thái thiết bị.
+  1. GET /api/ai/context → mode, nhiệt độ, độ ẩm, số người, fan1/fan2/fan3, ac_on, ac_temp.
   2. Chỉ xử lý khi mode = AUTO và dữ liệu cảm biến còn mới.
-  3. Chỉ gọi LLM khi có thay đổi đáng kể (số người đổi, nhiệt độ lệch ≥ TEMP_DELTA,
-     độ ẩm lệch ≥ HUMIDITY_DELTA...) hoặc đã quá LLM_MAX_INTERVAL_SECONDS,
-     và cách lần gọi trước ≥ LLM_MIN_INTERVAL_SECONDS → tiết kiệm quota miễn phí.
-  4. Gemini trả JSON → kiểm tra/kẹp giá trị → POST /api/ai/command.
-     Gemini lỗi / hết quota / JSON sai → dùng luật ngưỡng dự phòng (rules.py).
-  5. Ghi mỗi quyết định ra logs/decisions.jsonl (phục vụ báo cáo, đánh giá).
+  3. Chỉ ra quyết định khi có thay đổi đáng kể (số người, nhiệt độ ≥ TEMP_DELTA, độ ẩm ≥ HUMIDITY_DELTA,
+     trạng thái thiết bị bị đổi, hết thời gian chờ phòng trống) hoặc quá LLM_MAX_INTERVAL_SECONDS.
+  4. rules.plan() tính nhiệt độ cảm nhận + công suất của 8 phương án (0–3 quạt × AC bật/tắt)
+     và chọn phương án ít điện nhất vẫn đạt tiện nghi.
+  5. Có người → Gemini xem bảng phương án + bối cảnh, chọn cấu hình cuối và viết lý do.
+     Gemini lỗi → dùng phương án của planner. Phòng trống → xử lý tự động, không gọi Gemini.
+  6. Ràng buộc vận hành: thời gian bật/tắt tối thiểu của AC, chờ trước khi tắt AC khi phòng trống.
+  7. Chọn quạt cụ thể sao cho ít bật/tắt nhất → POST /api/ai/command {fan1, fan2, fan3, ...}.
+  8. Ghi logs/decisions.jsonl (đầu vào, phương án planner, quyết định cuối, công suất ước tính,
+     công suất nếu "chỉ bật AC 25°C" để so sánh).
 """
 import json
 import logging
@@ -24,18 +28,23 @@ from backend_client import BackendClient, BackendError, ModeIsManual
 from config import Settings
 from llm_client import GeminiClient, LLMError
 from prompts import RESPONSE_SCHEMA, build_system_prompt, build_user_prompt
-from rules import rule_decision
+import device_profile
+import rules
+from rules import fans_text
 
 logger = logging.getLogger("decision")
 
 
 @dataclass
 class Decision:
-    fan_level: int
+    fan_count: int
     ac_on: bool
     ac_temp: int
     ai_reason: str
-    source: str  # "GEMINI" | "RULE"
+    source: str            # "GEMINI" | "RULE" | "AUTO"
+    fans: tuple = (False, False, False)
+    mode_label: str = ""   # chỉ quạt / kết hợp / chỉ điều hòa / tắt hết / làm mát nhanh / chờ tắt
+    est_power_w: float = 0.0
 
 
 # ----------------------------------------------------------------------
@@ -66,27 +75,39 @@ def _to_bool(value) -> bool:
     return str(value).strip().lower() in ("true", "1", "yes", "on", "bật", "bat")
 
 
-def validate_decision(raw: dict, current_ac_temp: int, ac_min: int, ac_max: int) -> dict:
-    """Kiểm tra JSON của LLM, kẹp về khoảng hợp lệ. Thiếu field → ValueError."""
-    missing = [k for k in ("fan_level", "ac_on", "ac_temp") if k not in raw]
-    if missing:
-        raise ValueError(f"LLM thiếu trường {missing}")
+def parse_fans(ctx: dict) -> tuple:
+    """Đọc trạng thái 3 quạt từ context v4; vẫn hiểu được context v3 (fan_level)."""
+    if any(k in ctx for k in ("fan1", "fan2", "fan3")):
+        return tuple(_to_bool(ctx.get(k, False)) for k in ("fan1", "fan2", "fan3"))
+    level = int(ctx.get("fan_level") or 0)
+    return tuple(i < level for i in range(3))
 
-    fan = int(round(float(raw["fan_level"])))
-    fan = min(3, max(0, fan))
-    ac_on = _to_bool(raw["ac_on"])
+
+def validate_decision(raw: dict, current_ac_temp: int, ac_min: int, ac_max: int,
+                      max_fans: int = 3, ac_available: bool = True) -> dict:
+    """Kiểm tra JSON của LLM, kẹp về khoảng hợp lệ. Thiếu field → ValueError."""
+    if "fan_count" in raw:
+        fan_count = int(round(float(raw["fan_count"])))
+    elif any(k in raw for k in ("fan1", "fan2", "fan3")):
+        fan_count = sum(_to_bool(raw.get(k, False)) for k in ("fan1", "fan2", "fan3"))
+    else:
+        raise ValueError("LLM thiếu fan_count")
+    if "ac_on" not in raw:
+        raise ValueError("LLM thiếu ac_on")
+
+    fan_count = min(max_fans, max(0, fan_count))
+    ac_on = _to_bool(raw["ac_on"]) and ac_available
     try:
-        ac_temp = int(round(float(raw["ac_temp"])))
+        ac_temp = int(round(float(raw.get("ac_temp", current_ac_temp))))
     except (TypeError, ValueError):
         ac_temp = current_ac_temp
-    ac_temp = min(ac_max, max(ac_min, ac_temp))
     if not ac_on:
-        ac_temp = min(ac_max, max(ac_min, current_ac_temp))  # tắt AC thì giữ giá trị đặt cũ
+        ac_temp = current_ac_temp  # tắt AC thì giữ giá trị đặt cũ
+    ac_temp = min(ac_max, max(ac_min, ac_temp))
 
     reason = str(raw.get("ai_reason") or "").strip().replace("\n", " ")
-    if not reason:
-        reason = "Gemini không ghi lý do."
-    return {"fan_level": fan, "ac_on": ac_on, "ac_temp": ac_temp, "ai_reason": reason[:300]}
+    return {"fan_count": fan_count, "ac_on": ac_on, "ac_temp": ac_temp,
+            "ai_reason": (reason or "Gemini không ghi lý do.")[:300]}
 
 
 # ----------------------------------------------------------------------
@@ -97,12 +118,68 @@ class DecisionEngine:
         self.s = settings
         self.backend = backend
         self.llm = llm
-        self.system_prompt = build_system_prompt(settings.ac_min_temp, settings.ac_max_temp)
+        self.profile, warnings = device_profile.from_env()
+        for w in warnings:
+            logger.warning("Hồ sơ thiết bị: %s", w)
+        self._profile_raw: Optional[str] = None
+        self._rebuild_config()
         self._last_inputs: Optional[dict] = None
         self._last_call: float = 0.0
+        self._last_seen_ac: Optional[bool] = None
+        self._ac_changed_at: Optional[float] = None       # lần cuối AC đổi bật/tắt (monotonic)
+        self._while_ac_off: Optional[tuple] = None        # (nhiệt độ, độ ẩm) đo gần nhất khi AC tắt
+        self._natural: Optional[tuple] = None             # (nhiệt độ, độ ẩm "tự nhiên", thời điểm)
+        self._empty_since: Optional[float] = None
         self._log_path = Path(settings.decision_log_path) if settings.decision_log_path else None
         if self._log_path and not self._log_path.is_absolute():
             self._log_path = Path(__file__).resolve().parent / self._log_path
+
+    # ---------- hồ sơ thiết bị (mặc định → .env → backend "config") ----------
+    def _rebuild_config(self) -> None:
+        self.cfg = rules.build_config(self.profile, self.s)
+        self.system_prompt = build_system_prompt(self.cfg)
+
+    def _update_profile(self, ctx: dict) -> None:
+        """Nếu backend gửi kèm "config" (người dùng nhập trên app) thì ghi đè lên mặc định/.env.
+        Chỉ xử lý lại khi nội dung thay đổi."""
+        raw = ctx.get("config")
+        if not isinstance(raw, dict):
+            return
+        key = json.dumps(raw, sort_keys=True, default=str)
+        if key == self._profile_raw:
+            return
+        self._profile_raw = key
+        base, _ = device_profile.from_env()
+        warnings = base.apply(raw, "backend")
+        for w in warnings:
+            logger.warning("Hồ sơ thiết bị: %s", w)
+        if base.signature() != self.profile.signature():
+            logger.info("Cập nhật hồ sơ thiết bị từ backend: %s", base.to_dict())
+            self.profile = base
+            self._rebuild_config()
+            self._last_inputs = None  # cấu hình đổi → quyết định lại ngay
+
+    # ---------- theo dõi trạng thái AC ----------
+    def _observe(self, temperature: float, humidity: Optional[float], ac_on: bool) -> None:
+        now = time.monotonic()
+        if self._last_seen_ac is not None and ac_on != self._last_seen_ac:
+            self._ac_changed_at = now
+            if ac_on:  # AC vừa bật (do ai cũng được) → nhớ điều kiện phòng trước khi bật
+                t, h = self._while_ac_off or (temperature, humidity)
+                self._natural = (t, h, now)
+        self._last_seen_ac = ac_on
+        if not ac_on:
+            self._while_ac_off = (temperature, humidity)
+            self._natural = None
+
+    def _natural_estimate(self) -> tuple:
+        """(nhiệt độ, độ ẩm) của phòng nếu không có AC, hoặc (None, None) nếu không biết / quá cũ."""
+        if not self._natural:
+            return None, None
+        t, h, since = self._natural
+        if time.monotonic() - since > self.s.natural_temp_ttl_seconds:
+            return None, None
+        return t, h
 
     # ---------- khi nào cần quyết định lại ----------
     def _trigger_reason(self, inputs: dict) -> Optional[str]:
@@ -118,6 +195,9 @@ class DecisionEngine:
             return f"độ ẩm đổi {last['humidity']:.0f} → {inputs['humidity']:.0f}%"
         if inputs["device"] != last["device"]:
             return "trạng thái thiết bị bị thay đổi từ bên ngoài"
+        if (inputs["people"] == 0 and inputs["device"][1] and self._empty_since is not None
+                and time.monotonic() - self._empty_since >= self.s.empty_ac_grace_seconds):
+            return "phòng trống đủ lâu"
         if time.monotonic() - self._last_call >= self.s.llm_max_interval:
             return "đánh giá lại định kỳ"
         return None
@@ -136,10 +216,12 @@ class DecisionEngine:
             self._last_inputs = None
             return None
 
+        self._update_profile(ctx)
         temperature = ctx.get("temperature")
         if temperature is None:
             logger.info("Chưa có dữ liệu nhiệt độ từ ESP32 → bỏ qua")
             return None
+        temperature = float(temperature)
         sensor_age = age_seconds(ctx.get("sensor_timestamp"))
         if sensor_age is not None and sensor_age > self.s.sensor_stale_seconds:
             logger.warning("Dữ liệu cảm biến đã cũ %.0fs → không ra quyết định", sensor_age)
@@ -148,56 +230,95 @@ class DecisionEngine:
         people_age = age_seconds(ctx.get("people_updated_at"))
         people_fresh = people_age is not None and people_age <= self.s.people_stale_seconds
         people = int(ctx.get("people_count") or 0) if people_fresh else None
-
         humidity = ctx.get("humidity")
+        humidity = float(humidity) if humidity is not None else None
+
+        fans_now = parse_fans(ctx)
         current = {
-            "fan_level": int(ctx.get("fan_level") or 0),
-            "ac_on": bool(ctx.get("ac_on")),
+            "fans": fans_now,
+            "fan_count": sum(fans_now),
+            "ac_on": _to_bool(ctx.get("ac_on", False)),
             "ac_temp": int(ctx.get("ac_temp") or 26),
         }
+        self._observe(temperature, humidity, current["ac_on"])
+        if people == 0:
+            self._empty_since = self._empty_since or time.monotonic()
+        elif people is not None:
+            self._empty_since = None
+
         inputs = {
             "people": people,
-            "temperature": float(temperature),
-            "humidity": float(humidity) if humidity is not None else None,
-            "device": (current["fan_level"], current["ac_on"], current["ac_temp"]),
+            "temperature": temperature,
+            "humidity": humidity,
+            "device": (fans_now, current["ac_on"], current["ac_temp"]),
         }
-
         why = self._trigger_reason(inputs)
         if why is None:
             return None
         if time.monotonic() - self._last_call < self.s.llm_min_interval:
             return None  # giữ trigger, xử lý ở vòng sau
 
-        logger.info("Ra quyết định (%s): người=%s T=%.1f H=%s | hiện tại %s",
-                    why, people if people is not None else "?", inputs["temperature"],
-                    humidity, current)
-        self._last_call = time.monotonic()
-
-        decision, latency, llm_error = self._decide(ctx, inputs, current, people_age, sensor_age)
-
-        if decision is None:
-            logger.info("Giữ nguyên trạng thái (số người không rõ, Gemini không khả dụng)")
-            self._remember(inputs, current)
+        if people is None:
+            logger.info("Số người không rõ (camera chưa gửi / dữ liệu cũ) → giữ nguyên trạng thái")
+            self._remember(inputs)
             return None
 
-        # Guardrail: phòng trống chắc chắn → luôn tắt hết
-        if people == 0 and (decision.fan_level > 0 or decision.ac_on):
-            decision.fan_level, decision.ac_on = 0, False
-            decision.ac_temp = current["ac_temp"]
-            decision.ai_reason += " (Hệ thống: phòng trống nên tắt toàn bộ.)"
+        self._last_call = time.monotonic()
+        natural = self._natural_estimate() if current["ac_on"] else (None, None)
+        best, steady, options = rules.plan(temperature, humidity, people, current, self.cfg, *natural)
+        logger.info("Ra quyết định (%s): người=%d T=%.1f H=%s | hiện tại %s, AC %s | planner: %s (%s, ~%.0f W)",
+                    why, people, temperature, humidity, fans_text(fans_now),
+                    f"{current['ac_temp']}°C" if current["ac_on"] else "tắt",
+                    best.describe(), best.label, best.power_w)
 
-        prefix = "[Gemini] " if decision.source == "GEMINI" else "[Luật dự phòng] "
-        reason = (prefix + decision.ai_reason)[:500]
+        keeps_state = (best.fan_set == fans_now and best.ac_on == current["ac_on"]
+                       and (not best.ac_on or best.ac_temp == current["ac_temp"]))
+        minor = why == "đánh giá lại định kỳ" or why.startswith(("nhiệt độ đổi", "độ ẩm đổi"))
+        if people > 0 and keeps_state and minor:
+            # Tối ưu: planner xác nhận trạng thái hiện tại vẫn tối ưu → không gọi Gemini, không gửi lệnh
+            logger.info("Trạng thái hiện tại vẫn là phương án tốt nhất (%s) → giữ nguyên, không gọi Gemini",
+                        best.label)
+            self._remember(inputs)
+            return None
+
+        notes = self._constraint_notes(current)
+        llm_error = latency = None
+        if people == 0:
+            decision = self._empty_room_decision(temperature, current)
+        else:
+            decision, latency, llm_error = self._ask_llm(ctx, temperature, humidity, people, people_age,
+                                                         current, best, options, notes)
+            if decision is not None:
+                decision = self._comfort_guard(decision, best, temperature, humidity, people, natural)
+            if decision is None:
+                decision = Decision(fan_count=best.fans, ac_on=best.ac_on,
+                                    ac_temp=best.ac_temp if best.ac_on else current["ac_temp"],
+                                    ai_reason=rules.explain(best, temperature, humidity, people, self.cfg),
+                                    source="RULE", mode_label=best.label)
+
+        self._apply_ac_timing(decision, current)
+        if decision.fan_count == best.fans:
+            decision.fans = best.fan_set
+        else:
+            decision.fans = rules.select_fans(decision.fan_count, fans_now, self.cfg)
+        final = rules.evaluate(decision.fans, decision.ac_on, decision.ac_temp, temperature, humidity,
+                               people, self.cfg, *natural)
+        decision.est_power_w = final.power_w
+        decision.mode_label = decision.mode_label or final.label
+
+        prefix = {"GEMINI": "[Gemini] ", "RULE": "[Luật dự phòng] ", "AUTO": "[Tự động] "}[decision.source]
+        reason = f"{prefix}{decision.ai_reason} (~{decision.est_power_w:.0f} W)"[:500]
 
         sent, send_error = False, None
         if self.s.dry_run:
-            logger.info("DRY-RUN, không gửi: %s", decision)
+            logger.info("DRY-RUN, không gửi: %s, AC %s | %s", fans_text(decision.fans),
+                        f"{decision.ac_temp}°C" if decision.ac_on else "tắt", reason)
         else:
             try:
-                self.backend.send_command(decision.fan_level, decision.ac_on, decision.ac_temp, reason)
+                self.backend.send_command(decision.fans, decision.ac_on, decision.ac_temp, reason)
                 sent = True
-                logger.info("→ Đã gửi lệnh: quạt=%d AC=%s %d°C | %s", decision.fan_level,
-                            "ON" if decision.ac_on else "OFF", decision.ac_temp, reason)
+                logger.info("→ Đã gửi lệnh: %s, AC %s | %s", fans_text(decision.fans),
+                            f"ON {decision.ac_temp}°C" if decision.ac_on else "OFF", reason)
             except ModeIsManual:
                 send_error = "MANUAL"
                 logger.info("Người dùng vừa chuyển MANUAL → bỏ lệnh")
@@ -205,60 +326,112 @@ class DecisionEngine:
                 send_error = str(exc)
                 logger.warning("Không gửi được lệnh: %s", exc)
 
-        new_device = (decision.fan_level, decision.ac_on, decision.ac_temp) if sent else inputs["device"]
-        self._remember(inputs, dict(zip(("fan_level", "ac_on", "ac_temp"), new_device)))
-        self._write_log(ctx, inputs, why, decision, latency, llm_error, sent, send_error)
+        if sent:
+            self._observe(temperature, humidity, decision.ac_on)
+            device = (decision.fans, decision.ac_on, decision.ac_temp)
+        else:
+            device = inputs["device"]
+        self._remember({**inputs, "device": device})
+        self._write_log(why, inputs, current, best, steady, decision, latency, llm_error, sent, send_error)
         return decision
 
-    # ---------- LLM hoặc luật ----------
-    def _decide(self, ctx, inputs, current, people_age, sensor_age):
-        llm_error = None
-        latency = None
-        if self.llm is not None:
-            user_prompt = build_user_prompt(
-                people_count=inputs["people"],
-                people_age=people_age,
-                people_source=ctx.get("people_source") or "NONE",
-                temperature=inputs["temperature"],
-                humidity=inputs["humidity"],
-                sensor_age=sensor_age,
-                fan_level=current["fan_level"],
-                ac_on=current["ac_on"],
-                ac_temp=current["ac_temp"],
-                last_reason=ctx.get("ai_reason"),
-            )
-            started = time.monotonic()
-            try:
-                raw = self.llm.generate_json(self.system_prompt, user_prompt, RESPONSE_SCHEMA)
-                latency = round(time.monotonic() - started, 2)
-                checked = validate_decision(raw, current["ac_temp"], self.s.ac_min_temp, self.s.ac_max_temp)
-                logger.info("Gemini (%s, %.1fs): %s", self.llm.last_model, latency, raw)
-                return Decision(**checked, source="GEMINI"), latency, None
-            except (LLMError, ValueError, TypeError) as exc:
-                latency = round(time.monotonic() - started, 2)
-                llm_error = str(exc)
-                logger.warning("Gemini lỗi → dùng luật dự phòng: %s", exc)
+    # ---------- các nhánh quyết định ----------
+    def _empty_room_decision(self, temperature: float, current: dict) -> Decision:
+        """Phòng trống: tắt quạt ngay; AC chờ EMPTY_AC_GRACE_SECONDS (người có thể quay lại ngay,
+        khởi động lại máy nén tốn điện hơn) nhưng nâng nhiệt độ đặt lên để tiết kiệm."""
+        empty_for = time.monotonic() - (self._empty_since or time.monotonic())
+        if current["ac_on"] and empty_for < self.s.empty_ac_grace_seconds:
+            hold = max(current["ac_temp"], self.cfg.ac_set_max)
+            remain = self.s.empty_ac_grace_seconds - empty_for
+            return Decision(0, True, hold,
+                            f"Phòng vừa trống → tắt quạt, giữ điều hòa {hold}°C thêm ~{remain / 60:.0f} phút "
+                            f"phòng khi có người quay lại.", "AUTO", mode_label="chờ tắt")
+        return Decision(0, False, current["ac_temp"],
+                        f"Phòng trống, {temperature:.1f}°C → tắt toàn bộ quạt và điều hòa để tiết kiệm điện.",
+                        "AUTO", mode_label="tắt hết")
 
-        ruled = rule_decision(inputs["temperature"], inputs["humidity"], inputs["people"], current)
-        if ruled is None:
-            return None, latency, llm_error
-        ruled["ac_temp"] = min(self.s.ac_max_temp, max(self.s.ac_min_temp, ruled["ac_temp"]))
-        return Decision(**ruled, source="RULE"), latency, llm_error
+    def _ask_llm(self, ctx, temperature, humidity, people, people_age, current, best, options, notes):
+        if self.llm is None:
+            return None, None, None
+        user_prompt = build_user_prompt(
+            people_count=people, people_age=people_age, temperature=temperature, humidity=humidity,
+            feels_like=rules.feels_like_still(temperature, humidity, people),
+            current=current, options=options, recommended=best, notes=notes,
+            last_reason=ctx.get("ai_reason"),
+        )
+        started = time.monotonic()
+        try:
+            raw = self.llm.generate_json(self.system_prompt, user_prompt, RESPONSE_SCHEMA)
+            latency = round(time.monotonic() - started, 2)
+            checked = validate_decision(raw, current["ac_temp"], self.cfg.ac_min_temp, self.cfg.ac_set_max,
+                                        self.cfg.max_fans, self.cfg.ac_available)
+            logger.info("Gemini (%s, %.1fs): %s", self.llm.last_model, latency, raw)
+            return Decision(**checked, source="GEMINI"), latency, None
+        except (LLMError, ValueError, TypeError) as exc:
+            latency = round(time.monotonic() - started, 2)
+            logger.warning("Gemini lỗi → dùng phương án của planner: %s", exc)
+            return None, latency, str(exc)
 
-    def _remember(self, inputs: dict, device: dict) -> None:
-        self._last_inputs = {**inputs, "device": (device["fan_level"], device["ac_on"], device["ac_temp"])}
+    def _comfort_guard(self, d: Decision, best, temperature, humidity, people, natural) -> Decision:
+        """Gemini được quyền chọn khác planner, nhưng không được để phòng nóng rõ rệt
+        (cảm nhận vượt ngưỡng tiện nghi > 1°C) khi planner có phương án đạt tiện nghi."""
+        fan_set = rules.select_fans(d.fan_count, best.fan_set, self.cfg)
+        chosen = rules.evaluate(fan_set, d.ac_on, d.ac_temp, temperature, humidity, people, self.cfg, *natural)
+        if best.comfortable and chosen.feels_like > self.cfg.comfort_max + 1.0:
+            logger.warning("Gemini chọn %s (cảm nhận %.1f°C) quá nóng → dùng phương án planner",
+                           chosen.describe(), chosen.feels_like)
+            return Decision(best.fans, best.ac_on, best.ac_temp if best.ac_on else d.ac_temp,
+                            d.ai_reason + f" (Hệ thống điều chỉnh: {best.describe()} để đủ mát.)",
+                            "GEMINI", mode_label=best.label)
+        return d
 
-    def _write_log(self, ctx, inputs, why, decision, latency, llm_error, sent, send_error) -> None:
+    def _constraint_notes(self, current: dict) -> list[str]:
+        notes = []
+        if self._ac_changed_at is not None:
+            elapsed = time.monotonic() - self._ac_changed_at
+            if current["ac_on"] and elapsed < self.s.ac_min_on_seconds:
+                notes.append(f"điều hòa vừa bật {elapsed / 60:.0f} phút, chưa nên tắt "
+                             f"(tối thiểu {self.s.ac_min_on_seconds / 60:.0f} phút)")
+            if not current["ac_on"] and elapsed < self.s.ac_min_off_seconds:
+                notes.append(f"điều hòa vừa tắt {elapsed / 60:.0f} phút, chưa nên bật lại "
+                             f"(tối thiểu {self.s.ac_min_off_seconds / 60:.0f} phút) — dùng quạt tạm")
+        return notes
+
+    def _apply_ac_timing(self, d: Decision, current: dict) -> None:
+        """Bảo vệ máy nén: không đổi bật/tắt AC khi chưa đủ thời gian tối thiểu."""
+        if self._ac_changed_at is None or d.ac_on == current["ac_on"]:
+            return
+        elapsed = time.monotonic() - self._ac_changed_at
+        if current["ac_on"] and elapsed < self.s.ac_min_on_seconds and d.source != "AUTO":
+            d.ac_on, d.ac_temp = True, current["ac_temp"]
+            d.ai_reason += " (Giữ điều hòa: chưa đủ thời gian chạy tối thiểu.)"
+        elif not current["ac_on"] and elapsed < self.s.ac_min_off_seconds:
+            d.ac_on, d.fan_count = False, self.cfg.max_fans
+            d.ai_reason += " (Tạm bật hết quạt: điều hòa vừa tắt, chờ đủ thời gian mới bật lại.)"
+        else:
+            return
+        d.mode_label = ""
+
+    def _remember(self, inputs: dict) -> None:
+        self._last_inputs = dict(inputs)
+
+    def _write_log(self, why, inputs, current, best, steady, decision, latency, llm_error, sent, send_error):
         if not self._log_path:
             return
+        base = rules.baseline_power(inputs["temperature"], inputs["humidity"], inputs["people"] or 0, self.cfg)
         record = {
             "time": datetime.now().isoformat(timespec="seconds"),
             "trigger": why,
             "people": inputs["people"],
             "temperature": inputs["temperature"],
             "humidity": inputs["humidity"],
-            "before": {"fan_level": ctx.get("fan_level"), "ac_on": ctx.get("ac_on"), "ac_temp": ctx.get("ac_temp")},
-            "decision": asdict(decision),
+            "before": {"fans": list(current["fans"]), "ac_on": current["ac_on"], "ac_temp": current["ac_temp"]},
+            "planner": {"fans": best.fans, "ac_on": best.ac_on, "ac_temp": best.ac_temp,
+                        "label": best.label, "power_w": best.power_w,
+                        "steady_label": steady.label, "steady_power_w": steady.power_w},
+            "decision": {**asdict(decision), "fans": list(decision.fans)},
+            "baseline_ac_only_w": base,
+            "profile": self.profile.to_dict(),
             "model": self.llm.last_model if (self.llm and decision.source == "GEMINI") else None,
             "llm_latency_s": latency,
             "llm_error": llm_error,
@@ -276,7 +449,9 @@ class DecisionEngine:
     def run_loop(self, stop_event: threading.Event, once: bool = False) -> Optional[Decision]:
         logger.info("Bộ quyết định chạy: kiểm tra mỗi %.0fs, gọi LLM cách nhau %.0f–%.0fs, LLM=%s",
                     self.s.decision_check_interval, self.s.llm_min_interval, self.s.llm_max_interval,
-                    ",".join(self.llm.models) if self.llm else "TẮT (chỉ dùng luật)")
+                    ",".join(self.llm.models) if self.llm else "TẮT (chỉ dùng planner)")
+        logger.info("Hồ sơ thiết bị: %s (nguồn: %s)", self.profile.to_dict(),
+                    {k: v for k, v in self.profile.sources.items() if v != "default"} or "mặc định")
         result = None
         while not stop_event.is_set():
             try:
