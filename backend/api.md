@@ -1,14 +1,20 @@
-# AIoT Smart Room — API Contract v4
+# AIoT Smart Room — API Contract v5
 
 > Base URL: `http://<IP_LAPTOP>:8006` (dev: `http://localhost:8006`)
 > Swagger: `http://localhost:8006/docs`
-> DB: SQL Server `aiot_db` (schema v4)
-> Version: `4.0.0`
+> DB: SQL Server `aiot_db` (schema v5)
+> Version: `5.0.0`
 >
 > **v4 thay đổi:** 1 quạt 3 mức (`fan_level` 0–3) → **3 quạt độc lập bật/tắt**
 > (`fan1`, `fan2`, `fan3`, kiểu `bool`). Không tương thích ngược với log cũ.
 > Phần AI (`/api/ai/*`, ai_engine nội bộ, ai_service Gemini) **chưa cập nhật** theo v4 —
 > endpoint AI vẫn nhận schema cũ nhưng sẽ lỗi khi thực thi cho đến khi được sửa sau.
+>
+> **v5 thêm mới:**
+> - **Cấu hình thiết bị** — `GET /api/devices/info`, `PUT /api/devices/info/{key}` 🔒
+>   (người dùng nhập **hãng quạt/điều hòa + công suất W**, mặc định quạt 45W, AC 900W).
+> - **Điện năng theo ngày** — `GET /api/energy/daily?days=7`, `GET /api/energy/summary`
+>   (tự động tích lũy từ luồng sensor 5s, đơn vị **Wh**, phục vụ biểu đồ cột).
 
 ---
 
@@ -75,6 +81,10 @@ Token lấy từ `POST /auth/login`, hết hạn sau 7 ngày (`ACCESS_TOKEN_EXPI
 | `GET /api/camera/stream?token=` | Flutter (4G/WiFi) | MJPEG qua backend | Stream token / JWT |
 | `GET /api/camera/snapshot` | YOLO / Flutter | Ảnh tĩnh | Không |
 | `GET /api/camera/status` | Flutter | Online/Offline | Không |
+| `GET /api/devices/info` | Flutter | Hãng + công suất 4 thiết bị | Không |
+| `PUT /api/devices/info/{key}` | Flutter | Nhập hãng/công suất | JWT |
+| `GET /api/energy/daily` | Flutter | Điện năng theo ngày (biểu đồ cột) | Không |
+| `GET /api/energy/summary` | Flutter | Tổng hôm nay + TB 7 ngày | Không |
 
 ---
 
@@ -237,6 +247,61 @@ Trả về `DeviceStateOut`.
 > 1. Bấm `MANUAL` → `PATCH /api/device/mode {"mode":"MANUAL"}`
 > 2. Bấm nút quạt / toggle AC / slider → `POST /api/device/command`
 > 3. Bấm `AUTO` → `PATCH /api/device/mode {"mode":"AUTO"}` rồi disable vùng điều khiển
+
+---
+
+## 2b. Device Info & Energy — cấu hình thiết bị + điện năng (mới từ v5)
+
+### `GET /api/devices/info`
+Danh sách 4 thiết bị cố định (`fan1`, `fan2`, `fan3`, `ac`).
+```json
+[
+  { "device_key": "fan1", "device_name": "Quạt 1", "brand": "Senko",
+    "power_watts": 45.0, "power_is_default": false,
+    "updated_at": "2026-11-21T23:35:23" },
+  { "device_key": "ac", "device_name": "Điều hòa", "brand": null,
+    "power_watts": 900.0, "power_is_default": false, "updated_at": null }
+]
+```
+- `brand: null` = người dùng chưa nhập hãng.
+- `power_is_default: true` = `power_watts` đang là **giá trị mặc định hệ thống** (quạt 45W, điều hòa 900W) vì người dùng chưa nhập số riêng.
+
+### `PUT /api/devices/info/{device_key}` 🔒
+`device_key` ∈ `fan1 | fan2 | fan3 | ac`. Chỉ sửa field có trong body (bỏ qua = giữ nguyên).
+```json
+{ "brand": "Senko", "power_watts": 50 }
+```
+- Gửi `"power_watts": null` → quay về công suất mặc định (`power_is_default` → `true`).
+- `power_watts` phải `> 0` và `≤ 5000`, ngược lại `422`.
+- Sai `device_key` → `404`. Thiếu JWT → `401`.
+- Trả về `DeviceInfoOut` như trên.
+
+### `GET /api/energy/daily?days=7`
+Điện năng theo ngày, từng thiết bị — **feed thẳng biểu đồ cột**. `days` ∈ 1–30.
+```json
+[
+  { "date": "2026-11-15", "fan1_wh": 0.0, "fan2_wh": 0.0, "fan3_wh": 0.0,
+    "ac_wh": 0.0, "total_wh": 0.0 },
+  { "date": "2026-11-21", "fan1_wh": 93.6, "fan2_wh": 45.2, "fan3_wh": 0.0,
+    "ac_wh": 5400.0, "total_wh": 5538.8 }
+]
+```
+- Luôn trả đủ `days` phần tử liên tục (ngày chưa có dữ liệu → toàn 0) — vẽ biểu đồ không bị khuyết cột.
+- Đơn vị **Wh** (quạt 45W chạy 4h ≈ 180 Wh = 0.18 kWh); muốn hiển thị kWh thì tự chia 1000.
+- Dữ liệu tự tích lũy backend-side từ luồng `POST /api/sensor` (5s/lần) × công suất trong `/api/devices/info`; **frontend không cần gửi gì**.
+
+### `GET /api/energy/summary`
+```json
+{
+  "today_wh": 5538.8,
+  "fan1_wh": 93.6, "fan2_wh": 45.2, "fan3_wh": 0.0, "ac_wh": 5400.0,
+  "avg_7d_wh": 3210.5,
+  "top_device": "ac",
+  "days_recorded": 4
+}
+```
+- `top_device`: `device_key` tốn điện nhất hôm nay (`null` nếu hôm nay chưa dùng gì).
+- `days_recorded`: số ngày có dữ liệu trong 7 ngày gần nhất (hiện "X/7 ngày").
 
 ---
 

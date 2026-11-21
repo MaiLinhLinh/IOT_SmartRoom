@@ -8,7 +8,7 @@
 // ====== CẤU HÌNH WIFI & SERVER ======
 const char* WIFI_SSID     = "PTIT_B2";
 const char* WIFI_PASSWORD = "";
-const char* SERVER_URL    = "http://10.18.3.220:8006";  // ipconfig để lấy IP
+const char* SERVER_URL    = "http://10.18.1.25:8006";  // ipconfig để lấy IP
 
 // ====== CHÂN GPIO — KHỚP VỚI MẠCH ĐÃ LẮP ======
 #define DHTPIN    4      // DHT11 DATA → D4

@@ -1,10 +1,11 @@
 """
-models.py — SQLAlchemy ORM models (schema v4)
-Bao gồm: sensor_logs, device_state, users, control_logs
+models.py — SQLAlchemy ORM models (schema v5)
+Bao gồm: sensor_logs, device_state, users, control_logs, device_info, energy_daily
 v4: 1 quạt 3 mức (fan_level) → 3 quạt độc lập bật/tắt (fan1, fan2, fan3)
+v5: thêm cấu hình thiết bị (hãng + công suất) và tổng hợp điện năng theo ngày
 """
 from sqlalchemy import (
-    Column, Integer, Float, Unicode, Boolean, DateTime, ForeignKey
+    Column, Integer, Float, Unicode, Boolean, DateTime, Date, ForeignKey
 )
 from sqlalchemy.sql import func
 from database import Base
@@ -90,3 +91,35 @@ class ControlLog(Base):
     temperature    = Column(Float, nullable=True)   # bối cảnh lúc thao tác
     humidity       = Column(Float, nullable=True)
     people_count   = Column(Integer, nullable=True)
+
+
+class DeviceInfo(Base):
+    """
+    device_info: cấu hình 4 thiết bị cố định (fan1, fan2, fan3, ac).
+    Người dùng nhập brand + power_watts; power_watts NULL = dùng giá trị mặc định
+    (quạt 45W, điều hòa 900W — xem DEFAULT_POWER_WATTS trong services/energy_service.py).
+    """
+    __tablename__ = "device_info"
+
+    device_key  = Column(Unicode(10), primary_key=True)   # fan1 | fan2 | fan3 | ac
+    device_name = Column(Unicode(100), nullable=False)
+    brand       = Column(Unicode(100), nullable=True)     # tên hãng
+    power_watts = Column(Float, nullable=True)            # công suất danh định (W)
+    updated_at  = Column(DateTime, server_default=func.getdate(), onupdate=func.getdate())
+
+
+class EnergyDaily(Base):
+    """
+    energy_daily: tổng hợp điện năng (Wh) theo ngày, từng thiết bị.
+    Ghi tăng dần: mỗi lần ESP32 gửi sensor (5s), backend cộng
+    thời gian chạy × công suất của các thiết bị đang bật trong khoảng đó.
+    Đơn vị Wh (1 ngày chỉ vài trăm Wh) — frontend tự /1000 để hiển thị kWh.
+    """
+    __tablename__ = "energy_daily"
+
+    date     = Column(Date, primary_key=True)
+    fan1_wh  = Column(Float, nullable=False, default=0.0)
+    fan2_wh  = Column(Float, nullable=False, default=0.0)
+    fan3_wh  = Column(Float, nullable=False, default=0.0)
+    ac_wh    = Column(Float, nullable=False, default=0.0)
+    total_wh = Column(Float, nullable=False, default=0.0)
