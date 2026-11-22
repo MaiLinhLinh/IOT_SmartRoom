@@ -341,7 +341,7 @@ def test_engine_reads_profile_from_backend_config():
     be = FakeBackend(_ctx(temperature=31.0, config={"ac_available": False, "fan_power_w": [50, 40, 70]}))
     eng = _engine(be, llm)
     eng.step()
-    assert eng.profile.sources["ac_available"] == "backend"
+    assert eng.profile.sources["ac_available"] == "backend:config"
     assert be.sent[0][1] is False and be.sent[0][0] == (True, True, True)   # không AC → bật hết quạt
     assert "không có điều hòa" in eng.system_prompt.lower() or "KHÔNG có điều hòa" in eng.system_prompt
 
@@ -373,6 +373,33 @@ def test_custom_scenario_file_loads():
     import simulator
     name, title, steps = simulator.load_scenario(str(Path(__file__).resolve().parents[1] / "scenarios/vi_du_tu_tao.json"))
     assert len(steps) == 3 and steps[1].values_at(0.5) == (30.0, 58.0)
+
+
+def test_profile_from_backend_v5_device_info():
+    items = [
+        {"device_key": "fan1", "power_watts": 45.0, "power_is_default": True},
+        {"device_key": "fan2", "power_watts": 60.0, "power_is_default": False},
+        {"device_key": "fan3", "power_watts": 45.0, "power_is_default": True},
+        {"device_key": "ac", "power_watts": 1200.0, "power_is_default": False},
+    ]
+    data = device_profile.from_device_info(items)
+    assert data == {"fan_power_w": [None, 60.0, None], "ac_power_w": 1200.0}
+    p, _ = device_profile.from_env({"FAN_POWER_W": "40"})
+    assert not p.apply(data, "backend:devices/info")
+    assert p.fan_power_w == [40.0, 60.0, 40.0] and p.ac_power_w == 1200.0   # quạt chưa nhập giữ .env
+    assert device_profile.from_device_info([{"device_key": "ac", "power_is_default": True,
+                                             "power_watts": 900}]) == {}
+
+
+def test_engine_reads_power_from_devices_info_api():
+    be = FakeBackend(_ctx(temperature=30.0, humidity=72.0))
+    be.get_device_info = lambda: [{"device_key": "ac", "power_watts": 300.0, "power_is_default": False}]
+    eng = _engine(be)
+    eng.step()
+    assert eng.profile.ac_power_w == 300.0 and eng.profile.sources["ac_power_w"] == "backend:devices/info"
+    assert be.sent[-1][1] is True
+    best, steady, _ = rules.plan(30.0, 72.0, 2, OFF, eng.cfg)
+    assert steady.label == "chỉ điều hòa"   # AC inverter rất tiết kiệm → không cần kèm quạt
 
 
 if __name__ == "__main__":

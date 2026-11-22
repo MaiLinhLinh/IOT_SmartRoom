@@ -104,6 +104,7 @@ class Settings:
     ac_min_off_seconds: float = field(default_factory=lambda: _float("AC_MIN_OFF_SECONDS", 300))
     empty_ac_grace_seconds: float = field(default_factory=lambda: _float("EMPTY_AC_GRACE_SECONDS", 180))
     natural_temp_ttl_seconds: float = field(default_factory=lambda: _float("NATURAL_TEMP_TTL_SECONDS", 1800))
+    device_info_refresh_seconds: float = field(default_factory=lambda: _float("DEVICE_INFO_REFRESH_SECONDS", 30))
     decision_log_path: str = field(default_factory=lambda: _str("DECISION_LOG_PATH", "logs/decisions.jsonl"))
     dry_run: bool = field(default_factory=lambda: _bool("DRY_RUN", False))
 

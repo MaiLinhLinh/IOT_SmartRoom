@@ -13,8 +13,34 @@
 | Backend v4 (device, sensor, logs, control-logs) | ✅ Đã chuyển 3 quạt (nhánh `mailinh`, chưa merge `master`) |
 | Backend phần AI (`/api/ai/context`, `/api/ai/command`, `ai_engine.py`) | ❌ Vẫn dùng `fan_level` → `/api/ai/context` trả **500**, `/api/ai/command` lỗi |
 | `ai_service` | ✅ Đã theo v4, có bản vá sẵn cho backend: `ai_service/docs/backend_ai_v4.patch` |
-| Người dùng nhập công suất thiết bị | ⏳ Phía AI đã sẵn sàng (đọc khối `config`), backend/Flutter chưa làm |
+| Người dùng nhập công suất thiết bị | ✅ Backend v5 có `/api/devices/info`, ai_service đã đọc được; Flutter cần làm form |
 | Flutter | ⏳ Đang chuyển sang 3 quạt theo `change.md` |
+
+### Cập nhật 22/11 — đối chiếu với backend v5 (commit `5be5a0f` của MaiLinh)
+
+| Hạng mục | Kế hoạch | Backend v5 đã làm | Đồng bộ với ai_service |
+|---|---|---|---|
+| Nhập công suất thiết bị (B4) | `device_config` + `config` trong context | ✅ `device_info` + `GET/PUT /api/devices/info` (hãng + công suất từng `fan1/fan2/fan3/ac`) | ✅ ai_service đọc `GET /api/devices/info` mỗi 30 s, chỉ lấy thiết bị đã nhập (`power_is_default=false`) |
+| Quạt/AC khả dụng, nhiệt độ mong muốn, khoảng nhiệt độ đặt | trong B4 | ⏳ chưa có | Dùng `.env`/mặc định; khi có thì trả trong `config` của `/api/ai/context` |
+| Thống kê điện năng (B6) | `GET /api/energy/summary` | ✅ `energy_daily` + `GET /api/energy/daily`, `/api/energy/summary` (cộng dồn mỗi lần `POST /api/sensor`) | ⚠ Công thức khác — xem B7 |
+| Sửa phần AI sang v4 (B1) | áp bản vá | ❌ chưa áp — `/api/ai/context` vẫn 500 | Bản vá vẫn áp sạch lên `5be5a0f` (đã kiểm tra) |
+| Ràng buộc công suất | quạt ≤ 300 W, AC 200–4000 W | `0 < power ≤ 5000` cho mọi thiết bị | ai_service chấp nhận quạt 5–500 W, AC 200–5000 W; ngoài khoảng bị bỏ qua (ghi cảnh báo) → nên kiểm tra theo loại ở backend |
+| Quyền sửa cấu hình | admin | mọi user đăng nhập | Tuỳ nhóm quyết định |
+
+**B7 — Thống nhất công thức điện năng của điều hòa (P1, việc nhỏ).** `energy_service.accumulate_energy` coi AC bật là
+luôn chạy đủ `power_watts`, còn planner của AI tính `P × (1 − 0.06 × (Tset − 24))`. Hệ quả: Dashboard điện năng
+**không thấy** phần tiết kiệm khi AI nâng nhiệt độ đặt lên 27–28°C (chiến lược "kết hợp"), và số `~W` trong lý do AI
+khác số trên biểu đồ. Đề xuất sửa 1 dòng (log trước đã có `ac_temp`):
+
+```python
+# services/energy_service.py — accumulate_energy()
+if prev_log.ac_on:
+    factor = max(0.4, 1 - 0.06 * ((prev_log.ac_temp or 24) - 24))
+    row.ac_wh += power["ac"] * factor * delta_hours
+```
+
+**Lưu ý khi demo bằng `simulate.py`**: các lệnh giả lập là lệnh thật nên vẫn được tính vào `energy_daily`
+(mode `backend` còn ghi cả `sensor_logs`). Muốn số liệu sạch thì xoá dòng `energy_daily` của ngày demo sau khi demo.
 
 ---
 

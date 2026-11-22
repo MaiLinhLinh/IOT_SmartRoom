@@ -94,31 +94,37 @@ Bảng tham khảo (2 người, phòng đang tắt hết; công suất ở trạ
 | 28.0°C | 72% | 1 quạt + AC 27°C | 783 W | 846 W |
 | 26.0–27.0°C | 82% | chỉ AC 26°C | 792 W | 846 W |
 
-### Hồ sơ thiết bị — chuẩn bị cho chức năng người dùng tự nhập
+### Hồ sơ thiết bị — thông số người dùng nhập
 
 Mọi thông số **phụ thuộc phòng/thiết bị** được gom vào `device_profile.py`, có sẵn giá trị mặc định nên chạy được
-ngay. Sau này backend/Flutter chỉ cần trả thêm khối `config` trong `GET /api/ai/context`, **ai_service không phải sửa code**:
+ngay. Thứ tự ưu tiên (lớp sau ghi đè lớp trước, từng trường):
 
 ```
-mặc định trong code  →  .env của ai_service  →  backend /api/ai/context "config"   (lớp sau ghi đè lớp trước, từng trường)
+mặc định trong code → .env của ai_service → GET /api/devices/info (backend v5) → /api/ai/context "config"
 ```
+
+- **Backend v5 (MaiLinh) đã có `GET/PUT /api/devices/info`**: người dùng nhập hãng + công suất `fan1/fan2/fan3/ac`
+  trên app. ai_service đọc lại mỗi `DEVICE_INFO_REFRESH_SECONDS` (30 s) và chỉ lấy thiết bị đã được nhập
+  (`power_is_default = false`); thiết bị chưa nhập giữ giá trị `.env`/mặc định. Không cần sửa ai_service.
+- Các trường backend **chưa có** (quạt/AC nào dùng được, nhiệt độ mong muốn, khoảng nhiệt độ đặt) vẫn lấy từ `.env`;
+  khi backend thêm, chỉ cần trả trong khối `config` của `/api/ai/context`.
 
 | Trường | Mặc định | Khoảng hợp lệ | Ý nghĩa |
 |---|---|---|---|
-| `fan_power_w` | `[45, 45, 45]` W | 5–300 W mỗi quạt | Công suất điện từng quạt (1 số = cả 3 quạt) |
+| `fan_power_w` | `[45, 45, 45]` W | 5–500 W mỗi quạt | Công suất điện từng quạt (1 số = cả 3 quạt) |
 | `fans_available` | `[true, true, true]` | — | Quạt nào dùng được (quạt hỏng → không bao giờ bật) |
 | `ac_available` | `true` | — | Phòng có điều hòa không (không → chỉ dùng quạt) |
-| `ac_power_w` | `900` W | 200–4000 W | Công suất **điện** của điều hòa (mục Input trên nhãn, không phải BTU) |
+| `ac_power_w` | `900` W | 200–5000 W | Công suất **điện** của điều hòa (mục Input trên nhãn, không phải BTU) |
 | `comfort_max_temp` | `26.0` °C | 23–29 °C | Nhiệt độ cảm nhận tối đa mong muốn |
 | `ac_set_min` / `ac_set_max` | `20` / `28` °C | 16–32 °C | Khoảng nhiệt độ đặt điều hòa cho phép |
 
-Ví dụ backend trả (khi đã làm chức năng nhập):
+Mở rộng sau này (các trường backend chưa có):
 ```json
-GET /api/ai/context → { ..., "config": { "fan_power_w": [45, 40, 70], "ac_power_w": 1200, "comfort_max_temp": 26.5 } }
+GET /api/ai/context → { ..., "config": { "fans_available": [true, true, false], "comfort_max_temp": 26.5 } }
 ```
 - Chỉ cần gửi các trường người dùng đã nhập; trường thiếu dùng giá trị `.env`/mặc định.
 - Giá trị sai kiểu hoặc ngoài khoảng bị bỏ qua (ghi cảnh báo), không làm dừng service.
-- Đổi cấu hình → ai_service áp dụng ngay ở vòng kế tiếp (không cần khởi động lại) và quyết định lại.
+- Đổi cấu hình → ai_service áp dụng ở lần đọc kế tiếp (≤ 30 s, không cần khởi động lại) và quyết định lại.
 - Mô tả đầy đủ cho form nhập: `docs/device_config_schema.json` (hoặc chạy `python device_profile.py`).
 
 Planner tận dụng hồ sơ này: chọn **quạt cụ thể** tốn ít điện nhất (rồi ít bật/tắt nhất), bỏ qua quạt hỏng;

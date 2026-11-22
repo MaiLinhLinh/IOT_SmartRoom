@@ -122,6 +122,9 @@ class DecisionEngine:
         for w in warnings:
             logger.warning("Hồ sơ thiết bị: %s", w)
         self._profile_raw: Optional[str] = None
+        self._device_info_at: float = 0.0
+        self._device_info_data: Optional[dict] = None
+        self._device_info_missing_logged = False
         self._rebuild_config()
         self._last_inputs: Optional[dict] = None
         self._last_call: float = 0.0
@@ -139,18 +142,39 @@ class DecisionEngine:
         self.cfg = rules.build_config(self.profile, self.s)
         self.system_prompt = build_system_prompt(self.cfg)
 
+    def _fetch_device_info(self) -> Optional[dict]:
+        """Đọc GET /api/devices/info (backend v5) định kỳ. Trả dict cho DeviceProfile.apply() hoặc None."""
+        if not hasattr(self.backend, "get_device_info"):
+            return None
+        now = time.monotonic()
+        if self._device_info_at and now - self._device_info_at < self.s.device_info_refresh_seconds:
+            return self._device_info_data
+        self._device_info_at = now
+        try:
+            items = self.backend.get_device_info()
+        except BackendError as exc:
+            logger.debug("Không đọc được /api/devices/info: %s", exc)
+            return self._device_info_data      # giữ dữ liệu lần trước
+        if items is None:
+            if not self._device_info_missing_logged:
+                logger.info("Backend chưa có /api/devices/info → dùng công suất từ .env/mặc định")
+                self._device_info_missing_logged = True
+            self._device_info_data = None
+        else:
+            self._device_info_data = device_profile.from_device_info(items)
+        return self._device_info_data
+
     def _update_profile(self, ctx: dict) -> None:
-        """Nếu backend gửi kèm "config" (người dùng nhập trên app) thì ghi đè lên mặc định/.env.
-        Chỉ xử lý lại khi nội dung thay đổi."""
-        raw = ctx.get("config")
-        if not isinstance(raw, dict):
-            return
-        key = json.dumps(raw, sort_keys=True, default=str)
+        """Ghép hồ sơ: mặc định → .env → /api/devices/info → context["config"].
+        Chỉ dựng lại cấu hình khi nội dung thay đổi."""
+        info = self._fetch_device_info()
+        raw = ctx.get("config") if isinstance(ctx.get("config"), dict) else None
+        key = json.dumps([info, raw], sort_keys=True, default=str)
         if key == self._profile_raw:
             return
         self._profile_raw = key
         base, _ = device_profile.from_env()
-        warnings = base.apply(raw, "backend")
+        warnings = base.apply(info or {}, "backend:devices/info") + base.apply(raw or {}, "backend:config")
         for w in warnings:
             logger.warning("Hồ sơ thiết bị: %s", w)
         if base.signature() != self.profile.signature():
@@ -158,6 +182,8 @@ class DecisionEngine:
             self.profile = base
             self._rebuild_config()
             self._last_inputs = None  # cấu hình đổi → quyết định lại ngay
+        else:
+            self.profile.sources = base.sources
 
     # ---------- theo dõi trạng thái AC ----------
     def _observe(self, temperature: float, humidity: Optional[float], ac_on: bool) -> None:

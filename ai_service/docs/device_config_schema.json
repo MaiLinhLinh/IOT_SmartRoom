@@ -8,7 +8,7 @@
       45.0
     ],
     "min": 5,
-    "max": 300,
+    "max": 500,
     "unit": "W",
     "env": "FAN_POWER_W",
     "label": "Công suất điện từng quạt",
@@ -45,7 +45,7 @@
     "type": "float",
     "default": 900.0,
     "min": 200,
-    "max": 4000,
+    "max": 5000,
     "unit": "W",
     "env": "AC_POWER_W",
     "label": "Công suất điện điều hòa",

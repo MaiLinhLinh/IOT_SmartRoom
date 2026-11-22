@@ -130,6 +130,26 @@ def set_mode(mode: str):
     return STATE
 
 
+DEVICE_INFO = {k: {"device_key": k, "device_name": n, "brand": None, "power_watts": None}
+               for k, n in (("fan1", "Quạt 1"), ("fan2", "Quạt 2"), ("fan3", "Quạt 3"), ("ac", "Điều hòa"))}
+DEFAULT_POWER = {"fan1": 45.0, "fan2": 45.0, "fan3": 45.0, "ac": 900.0}
+
+
+@app.get("/api/devices/info")
+def devices_info():
+    """Giống backend v5: power_watts null → trả mặc định + power_is_default=true."""
+    return [{**v, "power_watts": v["power_watts"] if v["power_watts"] is not None else DEFAULT_POWER[k],
+             "power_is_default": v["power_watts"] is None} for k, v in DEVICE_INFO.items()]
+
+
+@app.put("/api/devices/info/{device_key}")
+def update_device_info(device_key: str, body: dict):
+    if device_key not in DEVICE_INFO:
+        raise HTTPException(404, "device_key không hợp lệ")
+    DEVICE_INFO[device_key].update({k: v for k, v in body.items() if k in ("brand", "power_watts")})
+    return devices_info()
+
+
 @app.put("/test/config")
 def set_config(body: dict):
     """Giả lập người dùng nhập hồ sơ thiết bị trên app → backend trả trong /api/ai/context "config"."""
@@ -146,6 +166,8 @@ def reset():
     STATE.update(INITIAL_STATE, sensor_timestamp=datetime.now().isoformat())
     COMMANDS.clear()
     GEMINI_CALLS.clear()
+    for v in DEVICE_INFO.values():
+        v.update(brand=None, power_watts=None)
     return STATE
 
 

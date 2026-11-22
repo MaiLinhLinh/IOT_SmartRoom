@@ -4,7 +4,9 @@ device_profile.py — Hồ sơ THIẾT BỊ & SỞ THÍCH của phòng (thông t
 Thứ tự ưu tiên (lớp sau ghi đè lớp trước, từng trường riêng lẻ):
     1. Giá trị mặc định trong FIELDS bên dưới   (chạy được ngay, không cần cấu hình)
     2. .env của ai_service                       (nhóm tự chỉnh khi demo)
-    3. backend: GET /api/ai/context → "config"  (sau này người dùng nhập trên app Flutter)
+    3. backend:
+       a) GET /api/devices/info  (backend v5 — người dùng nhập công suất từng quạt/điều hòa trên app)
+       b) GET /api/ai/context → "config"  (nếu sau này backend gửi thêm các trường khác)
 
 Mỗi trường có: kiểu, mặc định, khoảng hợp lệ, đơn vị, nhãn + gợi ý tiếng Việt.
 → Bên backend/Flutter có thể dùng `schema()` (hoặc bảng trong README) để làm form nhập và kiểm tra dữ liệu,
@@ -21,14 +23,14 @@ N_FANS = 3
 
 # name: (kiểu, mặc định, min, max, đơn vị, env, nhãn, gợi ý)
 FIELDS: dict[str, tuple] = {
-    "fan_power_w": ("float[3]", [45.0, 45.0, 45.0], 5, 300, "W", "FAN_POWER_W",
+    "fan_power_w": ("float[3]", [45.0, 45.0, 45.0], 5, 500, "W", "FAN_POWER_W",
                     "Công suất điện từng quạt",
                     "Xem nhãn quạt. Quạt đứng/bàn ~35–60 W, quạt trần ~60–80 W. Nhập 1 số = 3 quạt như nhau."),
     "fans_available": ("bool[3]", [True, True, True], None, None, "", "FANS_AVAILABLE",
                        "Quạt nào đang có / dùng được", "Bỏ chọn quạt bị hỏng hoặc phòng không có."),
     "ac_available": ("bool", True, None, None, "", "AC_AVAILABLE",
                      "Phòng có điều hòa", "Tắt nếu phòng không có hoặc điều hòa hỏng."),
-    "ac_power_w": ("float", 900.0, 200, 4000, "W", "AC_POWER_W",
+    "ac_power_w": ("float", 900.0, 200, 5000, "W", "AC_POWER_W",
                    "Công suất điện điều hòa",
                    "Số W mục 'Input / Công suất tiêu thụ' trên nhãn, KHÔNG phải BTU. "
                    "1 HP ~750–900 W, 1.5 HP ~1100–1300 W, 2 HP ~1600–1900 W."),
@@ -77,6 +79,10 @@ class DeviceProfile:
             if name not in FIELDS or raw is None or raw == "":
                 continue
             try:
+                if FIELDS[name][0].endswith("[3]") and isinstance(raw, (list, tuple)) and len(raw) == N_FANS \
+                        and any(x is None for x in raw):
+                    current = getattr(self, name)       # None = giữ giá trị hiện có của phần tử đó
+                    raw = [c if x is None else x for x, c in zip(raw, current)]
                 value = _parse(name, raw)
             except ValueError as exc:
                 warnings.append(f"{source}.{name}={raw!r} bỏ qua: {exc}")
@@ -138,6 +144,33 @@ def from_env(environ: Optional[dict] = None) -> tuple[DeviceProfile, list[str]]:
     data = {name: environ.get(spec[5]) for name, spec in FIELDS.items() if environ.get(spec[5])}
     profile = DeviceProfile()
     return profile, profile.apply(data, "env")
+
+
+def from_device_info(items) -> dict:
+    """
+    Chuyển kết quả GET /api/devices/info (backend v5) thành dữ liệu cho DeviceProfile.apply().
+    Mỗi phần tử: {"device_key": "fan1|fan2|fan3|ac", "power_watts": float, "power_is_default": bool, ...}
+    Chỉ lấy công suất người dùng ĐÃ NHẬP (power_is_default = false); trường còn lại giữ .env/mặc định.
+    Trả về {} nếu không có gì để ghi đè.
+    """
+    data: dict = {}
+    if not isinstance(items, list):
+        return data
+    by_key = {str(i.get("device_key")): i for i in items if isinstance(i, dict)}
+    fan_powers, any_fan = [], False
+    for idx in range(1, N_FANS + 1):
+        item = by_key.get(f"fan{idx}") or {}
+        if item.get("power_watts") is not None and not item.get("power_is_default", False):
+            fan_powers.append(item["power_watts"])
+            any_fan = True
+        else:
+            fan_powers.append(None)       # giữ giá trị hiện có
+    if any_fan:
+        data["fan_power_w"] = fan_powers
+    ac = by_key.get("ac") or {}
+    if ac.get("power_watts") is not None and not ac.get("power_is_default", False):
+        data["ac_power_w"] = ac["power_watts"]
+    return data
 
 
 def schema() -> list[dict]:

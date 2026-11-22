@@ -5,6 +5,7 @@ backend_client.py — Gọi các API dành cho AI của backend (xem backend/api
     GET  /api/ai/context     ← dữ liệu để ra quyết định
     POST /api/ai/command     ← gửi quyết định (X-API-Key = AI_API_KEY nếu có)
     GET  /api/camera/snapshot← ảnh JPEG qua backend
+    GET  /api/devices/info   ← công suất thiết bị người dùng nhập (backend v5)
 """
 import logging
 from typing import Optional
@@ -93,6 +94,17 @@ class BackendClient:
         except requests.RequestException as exc:
             raise BackendError(f"POST /api/ai/command lỗi kết nối: {exc}") from exc
         self._raise(resp, "POST /api/ai/command")
+        return resp.json()
+
+    def get_device_info(self) -> Optional[list]:
+        """GET /api/devices/info (backend v5): công suất người dùng nhập. None nếu backend chưa có API này."""
+        try:
+            resp = self.session.get(self._url("/api/devices/info"), timeout=self.timeout)
+        except requests.RequestException as exc:
+            raise BackendError(f"GET /api/devices/info lỗi kết nối: {exc}") from exc
+        if resp.status_code == 404:
+            return None
+        self._raise(resp, "GET /api/devices/info")
         return resp.json()
 
     def get_snapshot(self, url: Optional[str] = None) -> bytes:

@@ -168,7 +168,8 @@ Các thông số phụ thuộc phòng được tách vào `device_profile.py`, c
 | `comfort_max_temp` | 26°C | 23–29°C |
 | `ac_set_min` / `ac_set_max` | 20 / 28°C | 16–32°C |
 
-Thứ tự ưu tiên: **mặc định → `.env` → backend `GET /api/ai/context` khối `config`** (ghi đè từng trường).
+Thứ tự ưu tiên: **mặc định → `.env` → backend `GET /api/devices/info` (v5: công suất người dùng nhập) →
+khối `config` trong `/api/ai/context`** (ghi đè từng trường).
 Giá trị sai bị bỏ qua kèm cảnh báo; đổi cấu hình áp dụng ngay ở vòng kế tiếp. Mô tả đầy đủ cho form nhập:
 `ai_service/docs/device_config_schema.json`. Kế hoạch làm phía backend/Flutter: `docs/KE_HOACH_CAP_NHAT_BACKEND_FRONTEND.md`.
 
@@ -188,6 +189,10 @@ Mỗi quyết định ghi một dòng vào `ai_service/logs/decisions.jsonl`:
 | `baseline_ac_only_w` | Công suất nếu "chỉ bật AC 25°C" → tính % tiết kiệm |
 | `model`, `llm_latency_s`, `llm_error` | Độ trễ và độ tin cậy của Gemini |
 | `profile` | Hồ sơ thiết bị đang dùng |
+
+Backend v5 còn tự cộng dồn điện năng theo ngày (`GET /api/energy/daily`, `/api/energy/summary`) từ trạng thái thiết
+bị × công suất người dùng nhập. Lưu ý: backend hiện tính điều hòa luôn chạy đủ công suất, chưa giảm theo nhiệt độ đặt
+như mô hình của AI (xem B7 trong kế hoạch backend) — nên biểu đồ chỉ phản ánh phần tiết kiệm do tắt/không bật điều hòa.
 
 **Chỉ số đề xuất cho báo cáo**
 
