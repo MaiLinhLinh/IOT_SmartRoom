@@ -20,6 +20,8 @@ ESP32-CAM ──JPEG──► [1] people_counter.py: YOLO → trung vị 5 khung
 | `main.py` | Chạy 2 chức năng song song, tham số dòng lệnh |
 | `people_counter.py` | **Chức năng 1** — lấy ảnh, YOLO đếm người, lọc trung vị, gửi backend |
 | `rules.py` | **Bộ lập kế hoạch tiện nghi – năng lượng**: mô hình nhiệt độ cảm nhận, hiệu ứng quạt, công suất; chọn tập quạt + AC |
+| `simulate.py`, `simulator.py` | **Giả lập kịch bản demo** (nhiệt độ/độ ẩm/số người thay đổi theo kịch bản) |
+| `scenarios/` | Kịch bản tự tạo dạng JSON (có file ví dụ) |
 | `device_profile.py` | **Hồ sơ thiết bị & sở thích** (công suất từng quạt, quạt/AC nào có, nhiệt độ mong muốn): mặc định → `.env` → backend |
 | `decision_engine.py` | **Chức năng 2** — khi nào quyết định, hỏi Gemini, kiểm tra kết quả, ràng buộc vận hành, gửi lệnh |
 | `prompts.py` | System prompt (chiến lược) + prompt dữ liệu kèm bảng phương án |
@@ -158,10 +160,81 @@ nếu "chỉ bật AC 25°C" → dùng để thống kê mức tiết kiệm tro
 
 ---
 
+## Demo bằng kịch bản giả lập
+
+Khi demo trực tiếp, nhiệt độ/độ ẩm trong phòng gần như không đổi nên không thấy được hệ thống chuyển chế độ.
+`simulate.py` cho nhiệt độ, độ ẩm, số người **thay đổi theo kịch bản**, AI ra quyết định như thật và (tùy chế độ)
+gửi lệnh thật xuống backend → LED/LCD trên mạch và Dashboard đổi theo.
+
+```powershell
+python simulate.py --list                          # xem kịch bản
+python simulate.py --mode offline                  # tập dượt trên máy, không cần backend/mạch (~4.5 phút)
+python simulate.py                                 # DEMO thật: kịch bản "full", mode override
+python simulate.py --scenario chi-dieu-hoa         # chỉ một chế độ
+python simulate.py --speed 2                       # nhanh gấp đôi
+python simulate.py --with-counter --real-people    # nhiệt độ/độ ẩm giả + số người THẬT từ camera
+python simulate.py --dry-run                       # chạy với backend thật nhưng không gửi lệnh
+python simulate.py --scenario scenarios/vi_du_tu_tao.json
+```
+
+### Ba cách nối với hệ thống (`--mode`)
+
+| Mode | AI đọc dữ liệu | Lệnh | Dashboard hiện nhiệt độ | Dùng khi |
+|---|---|---|---|---|
+| `offline` | backend giả trong bộ nhớ | không ra ngoài | — | Tập dượt, lấy kết quả cho báo cáo |
+| `override` (mặc định) | context thật, **thay** nhiệt độ/độ ẩm/số người bằng số giả lập | **gửi thật** | số thật (DHT11) | Demo: LED/LCD + lý do AI đổi theo kịch bản, không đụng dữ liệu cảm biến |
+| `backend` | đẩy số giả lên `/api/sensor`, `/api/people/count` rồi đọc lại | gửi thật | **số giả lập** | Muốn Dashboard hiện đúng số giả lập — phải rút dây DATA của DHT11 (ESP32 đọc lỗi sẽ không gửi), nếu không số thật/giả xen kẽ |
+
+Lý do AI luôn có tiền tố **`[Mô phỏng]`** (thấy trên Dashboard và trang Lịch sử thao tác); mỗi dòng
+`logs/decisions.jsonl` có trường `"simulation"` = tên kịch bản → không lẫn với dữ liệu thật.
+
+### Kịch bản `full` (~4.5 phút)
+
+| # | Bước | Giả lập | Kết quả mong đợi |
+|---|---|---|---|
+| 1 | Phòng mát | 25°C, 60%, 2 người | tắt hết |
+| 2 | Hơi ấm | 27°C, 60% | chỉ quạt (1 quạt) |
+| 3 | Ấm hơn | 28.5°C, 60% | chỉ quạt (2 quạt) |
+| 4 | Nóng dần | 29 → 31°C, 62% | kết hợp: AC 28°C + quạt (làm mát nhanh: bật hết quạt) |
+| 5 | Điều hòa đã kéo nhiệt xuống | 28.4°C, 60% | kết hợp ổn định: bớt quạt |
+| 6 | Đông người | 6 người | kết hợp: thêm quạt |
+| 7 | Mọi người ra về | 0 người | tắt quạt ngay, giữ AC 28°C ~10 s rồi tắt hết |
+| 8 | Có người, trời nồm ẩm | 27°C, 85% | chỉ điều hòa |
+| 9 | Điều hòa đã hút ẩm | 27°C, 68% | kết hợp |
+
+Kịch bản ngắn: `chi-quat`, `ket-hop`, `chi-dieu-hoa`, `phong-trong`. Cuối mỗi bước in ✓/✗ so với kết quả mong đợi,
+cuối kịch bản in bảng tổng kết. Đã chạy thử: 5 kịch bản dựng sẵn đều đạt 100% (planner, Gemini giả, backend thật trên SQLite).
+
+**Thời gian rút gọn cho demo** (mặc định; `--real-timing` để dùng thời gian thật): AC bật tối thiểu 20 s (thật: 10 phút),
+tắt tối thiểu 10 s (thật: 5 phút), phòng trống chờ 10 s (thật: 3 phút), kiểm tra mỗi 2 s, 2 lần gọi Gemini cách nhau ≥ 3 s.
+
+### Chuẩn bị trước buổi demo
+
+1. Backend đã áp bản vá AI v4, `AI_ENGINE_ENABLED=false`, thiết bị ở **AUTO** (simulate.py cảnh báo nếu đang MANUAL).
+2. **Không chạy `main.py` cùng lúc** với `simulate.py` (hai bộ quyết định sẽ tranh nhau). Cần đếm người thật thì dùng
+   `simulate.py --with-counter`.
+3. Chạy tập dượt `--mode offline` trước; kịch bản `full` gọi Gemini khoảng 10 lần (vừa gói miễn phí).
+4. LCD trên mạch hiện nhiệt độ **thật** từ DHT11 (ở mode `override`); chế độ AUTO, trạng thái quạt/AC và lý do AI
+   trên Dashboard thay đổi theo kịch bản.
+
+### Tự tạo kịch bản (JSON)
+
+```json
+{
+  "title": "Mô tả",
+  "steps": [
+    {"name": "Nắng gắt", "duration": 40, "temperature": [28.5, 31.5], "humidity": 58, "people": 4,
+     "note": "Câu giải thích hiện cho người xem", "expect": ["kết hợp"]}
+  ]
+}
+```
+`temperature`/`humidity`: một số, hoặc `[từ, đến]` để tăng/giảm dần trong bước. `people`: bỏ trống = dùng số người thật
+(YOLO). `expect`: `tắt hết` | `chỉ quạt` | `kết hợp` | `chỉ điều hòa`. Xem `scenarios/vi_du_tu_tao.json`.
+
 ## Test
 
 ```powershell
-python tests/test_logic.py      # 30 unit test (planner 3 vùng, hồ sơ thiết bị, trễ, máy nén, phòng trống, Gemini...)
+python tests/test_logic.py      # 33 unit test (planner 3 vùng, hồ sơ thiết bị, trễ, máy nén, phòng trống, Gemini...)
 
 # End-to-end với backend giả v4 + Gemini giả (không cần SQL Server):
 set MOCK_SNAPSHOT=duong_dan_anh_co_nguoi.jpg

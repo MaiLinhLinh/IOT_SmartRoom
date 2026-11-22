@@ -198,8 +198,11 @@ Mỗi quyết định ghi một dòng vào `ai_service/logs/decisions.jsonl`:
 - Số lần gọi Gemini mỗi giờ, độ trễ trung bình, tỉ lệ `[Luật dự phòng]`.
 - Số phút "không đạt tiện nghi" (cảm nhận > ngưỡng) — kiểm tra bằng cách hỏi người trong phòng hoặc so với cảm biến.
 
-**Kịch bản thử nghiệm**: dùng `backend/esp32_sim.py` (giả lập nhiệt độ/độ ẩm/số người) hoặc
-`ai_service/tests/e2e_scenario.py` (chỉ quạt → kết hợp → chỉ AC → hồ sơ mới → phòng trống → MANUAL).
+**Kịch bản thử nghiệm / demo**: `ai_service/simulate.py` cho nhiệt độ, độ ẩm, số người thay đổi theo kịch bản
+(`full`, `chi-quat`, `ket-hop`, `chi-dieu-hoa`, `phong-trong` hoặc file JSON tự tạo), chấm ✓/✗ từng bước so với chế độ
+mong đợi. Chạy được offline (tập dượt, lấy số liệu) hoặc với backend thật (mode `override`: gửi lệnh thật nên LED/LCD,
+Dashboard đổi theo; lý do có tiền tố `[Mô phỏng]`). Thời gian máy nén/phòng trống được rút gọn cho demo.
+Kiểm thử tự động: `ai_service/tests/e2e_scenario.py`.
 
 ---
 

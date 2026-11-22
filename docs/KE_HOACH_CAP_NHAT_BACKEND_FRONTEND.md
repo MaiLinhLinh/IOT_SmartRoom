@@ -232,3 +232,5 @@ Tương thích: `ai_service` chạy được với backend **có hoặc chưa c�
 - [ ] Trang 6 có bản ghi `actor_type = AI` kèm lý do.
 - [ ] (P1) Đổi cấu hình trên app → AI áp dụng ở vòng kế tiếp.
 - [ ] Không có mạch: chạy `backend/esp32_sim.py --people` để giả lập cảm biến + số người.
+- [ ] Demo chuyển chế độ: `python ai_service/simulate.py` (mode override, không chạy `main.py` cùng lúc) —
+      Flutter nên hiện rõ nhãn `[Mô phỏng]` trong thẻ lý do AI.

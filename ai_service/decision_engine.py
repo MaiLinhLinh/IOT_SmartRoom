@@ -344,7 +344,8 @@ class DecisionEngine:
             hold = max(current["ac_temp"], self.cfg.ac_set_max)
             remain = self.s.empty_ac_grace_seconds - empty_for
             return Decision(0, True, hold,
-                            f"Phòng vừa trống → tắt quạt, giữ điều hòa {hold}°C thêm ~{remain / 60:.0f} phút "
+                            f"Phòng vừa trống → tắt quạt, giữ điều hòa {hold}°C thêm "
+                            f"{f'~{remain / 60:.0f} phút' if remain >= 90 else f'{remain:.0f} giây'} "
                             f"phòng khi có người quay lại.", "AUTO", mode_label="chờ tắt")
         return Decision(0, False, current["ac_temp"],
                         f"Phòng trống, {temperature:.1f}°C → tắt toàn bộ quạt và điều hòa để tiết kiệm điện.",
@@ -432,6 +433,7 @@ class DecisionEngine:
             "decision": {**asdict(decision), "fans": list(decision.fans)},
             "baseline_ac_only_w": base,
             "profile": self.profile.to_dict(),
+            "simulation": getattr(self.s, "simulation", None),   # tên kịch bản khi chạy simulate.py
             "model": self.llm.last_model if (self.llm and decision.source == "GEMINI") else None,
             "llm_latency_s": latency,
             "llm_error": llm_error,

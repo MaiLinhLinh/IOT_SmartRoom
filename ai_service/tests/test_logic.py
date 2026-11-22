@@ -346,6 +346,35 @@ def test_engine_reads_profile_from_backend_config():
     assert "không có điều hòa" in eng.system_prompt.lower() or "KHÔNG có điều hòa" in eng.system_prompt
 
 
+# ---------------- bộ giả lập demo ----------------
+def test_simulator_offline_scenarios_reach_expected_modes():
+    import simulator
+    for name in ("chi-quat", "chi-dieu-hoa"):
+        _, _, steps = simulator.load_scenario(name)
+        s = Settings()
+        s.decision_log_path, s.llm_min_interval, s.decision_check_interval = "", 0, 0.05
+        sim = simulator.SimulatedBackend(simulator.InMemoryBackend(), "offline")
+        eng = DecisionEngine(s, sim, None)
+        results = simulator.run_scenario(eng, sim, steps, speed=100, tick=0.05, printer=lambda *_: None)
+        assert all(r.ok is not False for r in results), [(r.name, r.mode_label, r.expect) for r in results]
+        assert all(c["ai_reason"].startswith("[Mô phỏng]") for c in sim.sent)
+
+
+def test_simulator_dry_run_keeps_virtual_state_without_sending():
+    import simulator
+    inner = simulator.InMemoryBackend()
+    sim = simulator.SimulatedBackend(inner, "offline", dry_run=True)
+    sim.set_values(30.0, 60.0, 2)
+    sim.send_command((True, True, False), True, 28, "x")
+    assert inner.commands == [] and sim.get_context()["ac_on"] is True
+
+
+def test_custom_scenario_file_loads():
+    import simulator
+    name, title, steps = simulator.load_scenario(str(Path(__file__).resolve().parents[1] / "scenarios/vi_du_tu_tao.json"))
+    assert len(steps) == 3 and steps[1].values_at(0.5) == (30.0, 58.0)
+
+
 if __name__ == "__main__":
     import inspect
     tests = [f for n, f in sorted(globals().items()) if n.startswith("test_") and inspect.isfunction(f)]
