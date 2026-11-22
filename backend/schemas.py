@@ -1,10 +1,11 @@
 """
-schemas.py — Pydantic schemas v4 (contract cuối cho Flutter)
+schemas.py — Pydantic schemas v5 (contract cuối cho Flutter)
 v4: 1 quạt 3 mức (fan_level) → 3 quạt độc lập bật/tắt (fan1, fan2, fan3)
+v5: thêm schemas cấu hình thiết bị (hãng/công suất) + điện năng theo ngày
 """
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, date
 
 
 # ========== AUTH & USER ==========
@@ -134,6 +135,59 @@ class AIDecisionIn(BaseModel):
     ac_on:     bool
     ac_temp:   int  = Field(default=26, ge=16, le=32)
     ai_reason: str  = Field(..., min_length=1, max_length=500)
+
+
+# ========== DEVICE INFO (hãng + công suất thiết bị) ==========
+
+class DeviceInfoOut(BaseModel):
+    """GET /api/devices/info — cấu hình 1 thiết bị."""
+    device_key:      str                        # fan1 | fan2 | fan3 | ac
+    device_name:     str
+    brand:           Optional[str] = None       # tên hãng (None = chưa nhập)
+    power_watts:     Optional[float] = None     # None = đang dùng giá trị mặc định
+    power_is_default: bool = False              # true → power_watts là mặc định hệ thống
+    updated_at:      Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class DeviceInfoUpdateIn(BaseModel):
+    """
+    PUT /api/devices/info/{device_key} — sửa hãng/công suất.
+    Bỏ qua field nào thì giữ nguyên field đó; gửi power_watts=null để về mặc định.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    brand:       Optional[str] = Field(None, max_length=100)
+    power_watts: Optional[float] = Field(None, gt=0, le=5000)
+
+
+# ========== ENERGY (điện năng theo ngày) ==========
+
+class EnergyDayOut(BaseModel):
+    """GET /api/energy/daily — điện năng 1 ngày, theo từng thiết bị (Wh)."""
+    date:     date
+    fan1_wh:  float
+    fan2_wh:  float
+    fan3_wh:  float
+    ac_wh:    float
+    total_wh: float
+
+    class Config:
+        from_attributes = True
+
+
+class EnergySummaryOut(BaseModel):
+    """GET /api/energy/summary — số liệu nhanh cho widget Dashboard."""
+    today_wh:        float                    # tổng hôm nay (Wh)
+    fan1_wh:         float
+    fan2_wh:         float
+    fan3_wh:         float
+    ac_wh:           float
+    avg_7d_wh:       float                    # trung bình 7 ngày gần nhất (Wh/ngày)
+    top_device:      Optional[str] = None     # device_key tốn điện nhất hôm nay
+    days_recorded:   int                      # số ngày đã có dữ liệu
 
 
 # ========== PEOPLE (YOLO service đẩy số người lên) ==========

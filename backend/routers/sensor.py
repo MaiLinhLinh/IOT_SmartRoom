@@ -11,6 +11,7 @@ from database import get_db
 from models import SensorLog
 from schemas import SensorDataIn, SensorDataOut
 from services.device_service import get_state
+from services.energy_service import accumulate_energy
 
 router = APIRouter(prefix="/api/sensor", tags=["Sensor"])
 
@@ -25,6 +26,9 @@ def receive_sensor(body: SensorDataIn, db: Session = Depends(get_db)):
     # Lấy trạng thái hiện tại (tự tạo row nếu thiếu)
     state = get_state(db)
 
+    # Log ngay trước đó — trạng thái thiết bị của khoảng thời gian vừa qua
+    prev_log = db.query(SensorLog).order_by(SensorLog.id.desc()).first()
+
     log = SensorLog(
         temperature  = body.temperature,
         humidity     = body.humidity,
@@ -37,6 +41,10 @@ def receive_sensor(body: SensorDataIn, db: Session = Depends(get_db)):
         mode         = state.mode,
     )
     db.add(log)
+
+    # Cộng điện năng của khoảng (prev_log → bây giờ) vào energy_daily hôm nay
+    accumulate_energy(db, prev_log=prev_log)
+
     db.commit()
     db.refresh(log)
 
