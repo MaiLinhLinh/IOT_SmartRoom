@@ -7,8 +7,8 @@
 >
 > **v4 thay đổi:** 1 quạt 3 mức (`fan_level` 0–3) → **3 quạt độc lập bật/tắt**
 > (`fan1`, `fan2`, `fan3`, kiểu `bool`). Không tương thích ngược với log cũ.
-> Phần AI (`/api/ai/*`, ai_engine nội bộ, ai_service Gemini) **chưa cập nhật** theo v4 —
-> endpoint AI vẫn nhận schema cũ nhưng sẽ lỗi khi thực thi cho đến khi được sửa sau.
+> Từ v5, phần AI đã cập nhật đầy đủ: `/api/ai/context` trả kèm công suất + điện năng,
+> `/api/ai/command` nhận `fan1/fan2/fan3` (lưu ý: **ai_service Gemini bên ngoài cần sửa** theo contract mới).
 >
 > **v5 thêm mới:**
 > - **Cấu hình thiết bị** — `GET /api/devices/info`, `PUT /api/devices/info/{key}` 🔒
@@ -345,8 +345,8 @@ Body:
 > AI **không gửi trực tiếp xuống ESP32**. Luồng:
 > `AI → POST /api/ai/command → device_state → ESP32 poll GET /api/device/state (2s) → LED/LCD`
 >
-> ⚠️ **Từ v4, phần AI chưa được cập nhật** (sẽ sửa sau): endpoint vẫn nhận `fan_level`
-> theo schema cũ nhưng sẽ lỗi khi thực thi. Chờ ai_service chuyển sang `fan1/fan2/fan3`.
+> Từ v5, `/api/ai/context` trả **đủ 1 lần**: trạng thái 3 quạt + AC, cảm biến, số người,
+> **công suất từng thiết bị** và **điện năng đã tiêu thụ** — AI chỉ cần gọi đúng endpoint này.
 >
 > Khi dùng AI bên ngoài, đặt `AI_ENGINE_ENABLED=false` trong `.env` để AI engine nội bộ không ghi đè.
 
@@ -356,7 +356,7 @@ X-API-Key: <AI_API_KEY>
 ```
 
 ### `GET /api/ai/context`
-Dữ liệu gộp để AI ra quyết định trong 1 lần gọi.
+Dữ liệu gộp để AI ra quyết định trong 1 lần gọi (v5):
 ```json
 {
   "mode": "AUTO",
@@ -371,9 +371,24 @@ Dữ liệu gộp để AI ra quyết định trong 1 lần gọi.
   "temperature": 30.5,
   "humidity": 70.0,
   "sensor_timestamp": "2026-10-31T22:03:15",
-  "ai_reason": null
+  "ai_reason": null,
+  "devices": [
+    { "device_key": "fan1", "device_name": "Quạt 1",  "brand": "Senko",   "power_watts": 45.0 },
+    { "device_key": "fan2", "device_name": "Quạt 2",  "brand": null,      "power_watts": 45.0 },
+    { "device_key": "fan3", "device_name": "Quạt 3",  "brand": null,      "power_watts": 45.0 },
+    { "device_key": "ac",   "device_name": "Điều hòa", "brand": null,     "power_watts": 900.0 }
+  ],
+  "energy": {
+    "today_wh": 1853.9,
+    "fan1_wh": 31.5, "fan2_wh": 0.0, "fan3_wh": 22.4, "ac_wh": 1800.0,
+    "avg_7d_wh": 3210.5,
+    "top_device": "ac",
+    "days_recorded": 4
+  }
 }
 ```
+- `devices[].power_watts` là công suất **đang áp dụng** (người dùng nhập hoặc mặc định).
+- `energy` giống hệt response của `GET /api/energy/summary`.
 
 ### `POST /api/ai/command`
 Chỉ hợp lệ khi thiết bị đang `AUTO` (nếu MANUAL trả `409`).
@@ -681,15 +696,14 @@ uvicorn main:app --host 0.0.0.0 --port 8006 --reload
 
 **Hai kênh riêng biệt**
 1. Đếm người → `POST /api/people/count` với `{"count": N, "source": "YOLO"}`.
-2. Ra quyết định → `POST /api/ai/command` với `fan_level`, `ac_on`, `ac_temp`, `ai_reason`
-   ⚠️ (chưa cập nhật v4 — sau sẽ đổi thành `fan1/fan2/fan3`).
+2. Ra quyết định → `POST /api/ai/command` với `fan1`, `fan2`, `fan3`, `ac_on`, `ac_temp`, `ai_reason`.
 
 **Điều khiển**
 - AI **không gửi trực tiếp xuống ESP32**. Gửi lên backend; ESP32 tự poll `/api/device/state` mỗi 2s.
 - Trước khi dùng AI bên ngoài, phối hợp đặt `AI_ENGINE_ENABLED=false` trong `.env` backend, nếu không AI nội bộ sẽ ghi đè quyết định.
 - `/api/ai/command` chỉ hợp lệ khi thiết bị đang `AUTO`. Nếu `MANUAL` → `409`.
 - `ai_reason` **bắt buộc**, viết tiếng Việt rõ ràng (hiển thị Dashboard + trang 6).
-- `fan_level`: `0–3` (⚠️ chưa cập nhật v4, sẽ đổi thành `fan1/fan2/fan3`); `ac_temp`: `16–32`; không gửi `mode` (backend luôn ghi `AUTO`).
+- `fan1/fan2/fan3`: `true`/`false` (3 quạt độc lập); `ac_temp`: `16–32`; không gửi `mode` (backend luôn ghi `AUTO`).
 - Gửi lặp cùng giá trị không tạo log rác; chỉ ghi `control_logs` khi trạng thái thực sự đổi.
 
 **Dữ liệu đầu vào**

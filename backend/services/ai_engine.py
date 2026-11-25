@@ -1,15 +1,15 @@
 ﻿"""
-services/ai_engine.py — AI tự động điều khiển (chế độ AUTO)
+services/ai_engine.py — AI tự động điều khiển (chế độ AUTO) — v5
 
 Nguồn số người: module YOLO chạy riêng đẩy lên POST /api/people/count
 → backend lưu device_state.people_count → AI engine đọc lại (không tự gọi CAM).
 
-Logic bảng quyết định:
-  Không có người : fan=0, AC=OFF
-  T < 25         : fan=0, AC=OFF
-  25 <= T < 28   : fan=1, AC=OFF
-  28 <= T < 31   : fan=2, AC=ON  (T_set=26)
-  T >= 31        : fan=3, AC=ON  (T_set=24)
+Bảng quyết định (3 quạt độc lập, ưu tiên tiết kiệm điện — quạt 45W, AC 900W):
+  Không có người : tắt hết
+  T < 25         : tắt hết (mát rồi)
+  25 <= T < 28   : fan1                                (45W)
+  28 <= T < 31   : fan1 + fan2, AC ON (T_set=26)       (90W + 900W)
+  T >= 31        : fan1 + fan2 + fan3, AC ON (T_set=24) (135W + 900W)
 
 Chỉ chạy khi mode = "AUTO". Mọi thay đổi đều ghi control_logs + ai_reason.
 """
@@ -23,17 +23,28 @@ logger = logging.getLogger("ai_engine")
 
 def make_ai_decision(temperature: float, humidity: float, people_count: int) -> dict:
     """Hàm quyết định thuần túy — dễ unit test / thay bằng model ML sau."""
-    if people_count == 0:
-        return {"fan_level": 0, "ac_on": False, "ac_temp": 26}
+    fans = {
+        "fan1": False, "fan2": False, "fan3": False,
+        "ac_on": False, "ac_temp": 26,
+    }
 
+    if people_count == 0:
+        return fans
     if temperature < 25:
-        return {"fan_level": 0, "ac_on": False, "ac_temp": 26}
+        return fans
     elif temperature < 28:
-        return {"fan_level": 1, "ac_on": False, "ac_temp": 26}
+        fans["fan1"] = True
     elif temperature < 31:
-        return {"fan_level": 2, "ac_on": True,  "ac_temp": 26}
+        fans["fan1"] = True
+        fans["fan2"] = True
+        fans["ac_on"] = True
     else:
-        return {"fan_level": 3, "ac_on": True,  "ac_temp": 24}
+        fans["fan1"] = True
+        fans["fan2"] = True
+        fans["fan3"] = True
+        fans["ac_on"] = True
+        fans["ac_temp"] = 24
+    return fans
 
 
 def build_ai_reason(temperature: float, people_count: int, decision: dict) -> str:
@@ -41,7 +52,7 @@ def build_ai_reason(temperature: float, people_count: int, decision: dict) -> st
     if people_count == 0:
         return (
             f"Không phát hiện người trong phòng, nhiệt độ {temperature:.1f}°C "
-            f"→ Tắt quạt và điều hòa để tiết kiệm điện"
+            f"→ Tắt hết quạt và điều hòa để tiết kiệm điện"
         )
 
     if temperature >= 31:
@@ -53,7 +64,12 @@ def build_ai_reason(temperature: float, people_count: int, decision: dict) -> st
     else:
         situation = "mát mẻ"
 
-    fan_text = "tắt quạt" if decision["fan_level"] == 0 else f"quạt mức {decision['fan_level']}"
+    active = [i for i in (1, 2, 3) if decision[f"fan{i}"]]
+    if active:
+        fan_text = "Bật quạt " + ", ".join(str(i) for i in active)
+    else:
+        fan_text = "Tắt hết quạt"
+
     ac_text = (
         f"bật điều hòa {decision['ac_temp']}°C"
         if decision["ac_on"]
@@ -62,7 +78,7 @@ def build_ai_reason(temperature: float, people_count: int, decision: dict) -> st
 
     return (
         f"Phát hiện {people_count} người, nhiệt độ {temperature:.1f}°C {situation} "
-        f"→ {fan_text[0].upper()}{fan_text[1:]}, {ac_text}"
+        f"→ {fan_text}, {ac_text}"
     )
 
 
@@ -93,7 +109,9 @@ async def ai_control_loop():
 
             _, description, changed = apply_command(
                 db,
-                fan_level=decision["fan_level"],
+                fan1=decision["fan1"],
+                fan2=decision["fan2"],
+                fan3=decision["fan3"],
                 ac_on=decision["ac_on"],
                 ac_temp=decision["ac_temp"],
                 mode="AUTO",

@@ -128,10 +128,13 @@ class ModeUpdateIn(BaseModel):
 
 class AIDecisionIn(BaseModel):
     """
-    POST /api/ai/command — AI service bên ngoài gửi quyết định.
-    Không cần JWT, dùng X-API-Key nếu .env có AI_API_KEY.
+    POST /api/ai/command — AI service bên ngoài gửi quyết định (v5).
+    Điều khiển 3 quạt độc lập + điều hòa. Không cần JWT,
+    dùng X-API-Key nếu .env có AI_API_KEY.
     """
-    fan_level: int  = Field(..., ge=0, le=3)
+    fan1:      bool
+    fan2:      bool
+    fan3:      bool
     ac_on:     bool
     ac_temp:   int  = Field(default=26, ge=16, le=32)
     ai_reason: str  = Field(..., min_length=1, max_length=500)
