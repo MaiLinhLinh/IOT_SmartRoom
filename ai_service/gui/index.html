@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AIoT Smart Room — Bảng điều khiển AI</title>
+<style>
+  :root {
+    --bg: #f4f6f9; --card: #ffffff; --text: #1d2433; --muted: #6b7385; --line: #e3e7ee;
+    --accent: #2563eb; --accent-soft: #e8efff; --ok: #15803d; --ok-soft: #e7f6ec;
+    --warn: #b45309; --warn-soft: #fdf3e3; --bad: #b91c1c; --bad-soft: #fdeaea;
+    --fan: #0ea5e9; --ac: #6366f1; --console: #111827; --console-text: #e5e7eb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f141c; --card: #171e29; --text: #e6e9ef; --muted: #98a1b3; --line: #273142;
+      --accent: #60a5fa; --accent-soft: #1b2a44; --ok: #4ade80; --ok-soft: #15291d;
+      --warn: #fbbf24; --warn-soft: #30260f; --bad: #f87171; --bad-soft: #351717;
+      --console: #0a0e14; --console-text: #d6dae2;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 "Segoe UI", system-ui, -apple-system, Roboto, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; justify-content: space-between;
+           padding: 14px 20px; background: var(--card); border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0; font-size: 18px; font-weight: 650; }
+  header h1 small { color: var(--muted); font-weight: 400; margin-left: 6px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip { padding: 4px 10px; border-radius: 999px; font-size: 12.5px; font-weight: 600;
+          background: var(--line); color: var(--muted); white-space: nowrap; }
+  .chip.ok { background: var(--ok-soft); color: var(--ok); }
+  .chip.bad { background: var(--bad-soft); color: var(--bad); }
+  .chip.warn { background: var(--warn-soft); color: var(--warn); }
+  .chip.run { background: var(--accent-soft); color: var(--accent); }
+  main { display: grid; grid-template-columns: minmax(320px, 420px) 1fr; gap: 16px; padding: 16px 20px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 12px 16px; } }
+  @media (max-width: 520px) { .tab { padding: 8px 6px; font-size: 13px; } .metric .v { font-size: 20px; } }
+  .col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .card h2 { margin: 0 0 12px; font-size: 15px; font-weight: 650; }
+  .tabs { display: flex; gap: 4px; margin: -4px 0 14px; border-bottom: 1px solid var(--line); }
+  .tab { border: 0; background: none; color: var(--muted); padding: 8px 10px; font: inherit; font-weight: 600; white-space: nowrap;
+         cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .pane { display: none; } .pane.active { display: block; }
+  label.field { display: block; margin-bottom: 12px; }
+  label.field > span { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 4px; font-weight: 600; }
+  select, input[type=text], input[type=password] {
+    width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--bg); color: var(--text); font: inherit; }
+  .radios { display: flex; flex-direction: column; gap: 6px; }
+  .radios label, .checks label { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; }
+  .radios small, .checks small { color: var(--muted); display: block; }
+  .checks { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  button.btn { border: 0; border-radius: 8px; padding: 9px 14px; font: inherit; font-weight: 650; cursor: pointer;
+               background: var(--accent); color: #fff; }
+  button.btn.secondary { background: var(--accent-soft); color: var(--accent); }
+  button.btn.danger { background: var(--bad); }
+  button.btn:disabled { opacity: .45; cursor: not-allowed; }
+  .hint { color: var(--muted); font-size: 12.5px; margin: 8px 0 0; }
+  .progress { margin-top: 14px; display: none; }
+  .bar { height: 8px; background: var(--line); border-radius: 99px; overflow: hidden; }
+  .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .4s; }
+  .progress .meta { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--muted); margin-top: 6px; }
+  .last { margin-top: 8px; padding: 8px 10px; background: var(--bg); border-radius: 8px; font-size: 13px; }
+  /* Phòng */
+  .room { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .metric { background: var(--bg); border-radius: 10px; padding: 10px 12px; }
+  .metric .v { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .metric .k { font-size: 12px; color: var(--muted); }
+  .devices { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 10px; }
+  @media (max-width: 520px) { .devices { grid-template-columns: repeat(2, 1fr); } }
+  .dev { border: 1px solid var(--line); border-radius: 10px; padding: 10px; text-align: center; color: var(--muted); }
+  .dev svg { width: 34px; height: 34px; display: block; margin: 0 auto 4px; }
+  .dev .name { font-weight: 650; font-size: 13px; }
+  .dev .st { font-size: 12px; }
+  .dev.on.fan { border-color: var(--fan); color: var(--fan); }
+  .dev.on.fan svg { animation: spin 1.2s linear infinite; }
+  .dev.on.ac { border-color: var(--ac); color: var(--ac); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .reason { margin-top: 12px; padding: 10px 12px; border-left: 3px solid var(--accent); background: var(--bg);
+            border-radius: 6px; font-size: 13.5px; }
+  .reason .tag { display: inline-block; font-size: 11.5px; font-weight: 700; padding: 1px 7px; border-radius: 99px;
+                 margin-right: 6px; background: var(--accent-soft); color: var(--accent); }
+  .reason .tag.sim { background: var(--warn-soft); color: var(--warn); }
+  .updated { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  /* Kiểm tra */
+  .checklist { list-style: none; padding: 0; margin: 12px 0 0; }
+  .checklist li { padding: 6px 0; border-top: 1px solid var(--line); font-size: 13px; }
+  .checklist b.ok { color: var(--ok); } .checklist b.bad { color: var(--bad); }
+  .kv { font-size: 13px; display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; margin-top: 12px; }
+  .kv dt { color: var(--muted); } .kv dd { margin: 0; overflow-wrap: anywhere; }
+  /* Log */
+  .logcard { display: flex; flex-direction: column; min-height: 360px; flex: 1; }
+  .loghead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .loghead h2 { margin: 0; }
+  .console { flex: 1; min-height: 320px; max-height: 62vh; overflow: auto; background: var(--console);
+             color: var(--console-text); border-radius: 10px; padding: 10px 12px;
+             font: 12.5px/1.5 Consolas, "Cascadia Mono", ui-monospace, monospace; white-space: pre-wrap; }
+  .console .t { color: #6b7280; margin-right: 8px; }
+  .console .gui { color: #93c5fd; } .console .ok { color: #86efac; } .console .bad { color: #fca5a5; }
+  .console .warn { color: #fcd34d; } .console .head { color: #fff; font-weight: 700; }
+  .console .act { color: #7dd3fc; }
+  .toast { position: fixed; right: 16px; bottom: 16px; max-width: 420px; padding: 10px 14px; border-radius: 10px;
+           background: var(--bad); color: #fff; font-weight: 600; display: none; z-index: 10; }
+  .toast.info { background: var(--ok); }
+</style>
+</head>
+<body>
+<header>
+  <h1>AIoT Smart Room <small>Bảng điều khiển AI</small></h1>
+  <div class="chips">
+    <span class="chip" id="chipBackend">Backend: …</span>
+    <span class="chip" id="chipMode">Thiết bị: …</span>
+    <span class="chip" id="chipProc">Không chạy</span>
+  </div>
+</header>
+
+<main>
+  <div class="col">
+    <section class="card">
+      <div class="tabs" role="tablist">
+        <button class="tab active" data-tab="sim">Demo giả lập</button>
+        <button class="tab" data-tab="ai">Chạy AI thật</button>
+        <button class="tab" data-tab="dev">Thiết bị &amp; kiểm tra</button>
+      </div>
+
+      <!-- Demo giả lập -->
+      <div class="pane active" id="pane-sim">
+        <label class="field"><span>Kịch bản</span><select id="scenario"></select></label>
+        <div class="field" style="margin-bottom:12px">
+          <span style="display:block;font-size:12.5px;color:var(--muted);margin-bottom:4px;font-weight:600">Chế độ</span>
+          <div class="radios">
+            <label><input type="radio" name="simmode" value="override" checked>
+              <div>Gửi lệnh thật <small>AI dùng nhiệt độ/độ ẩm giả lập, LED/LCD và Dashboard đổi theo (dùng khi demo)</small></div></label>
+            <label><input type="radio" name="simmode" value="backend">
+              <div>Đẩy số giả lên backend <small>Dashboard hiện số giả lập — cần rút dây DATA của DHT11</small></div></label>
+            <label><input type="radio" name="simmode" value="offline">
+              <div>Tập dượt (offline) <small>Không cần backend / mạch</small></div></label>
+          </div>
+        </div>
+        <label class="field"><span>Tốc độ</span>
+          <select id="speed">
+            <option value="0.5">x0.5 (chậm, dễ giải thích)</option>
+            <option value="1" selected>x1 (thời gian demo chuẩn)</option>
+            <option value="2">x2</option><option value="3">x3</option><option value="5">x5 (xem nhanh)</option>
+          </select></label>
+        <div class="checks">
+          <label><input type="checkbox" id="simDry"><div>Không gửi lệnh (dry-run)</div></label>
+          <label><input type="checkbox" id="simCounter"><div>Chạy kèm YOLO đếm người từ camera</div></label>
+          <label><input type="checkbox" id="simRealPeople"><div>Dùng số người thật thay cho kịch bản <small>Cần bật YOLO ở trên</small></div></label>
+        </div>
+        <div class="row">
+          <button class="btn" id="btnSim">▶ Chạy kịch bản</button>
+          <button class="btn danger" data-stop>■ Dừng</button>
+        </div>
+        <div class="progress" id="progress">
+          <div class="bar"><div id="barFill"></div></div>
+          <div class="meta"><span id="progStep">—</span><span id="progCount"></span></div>
+          <div class="last" id="progLast" style="display:none"></div>
+        </div>
+      </div>
+
+      <!-- AI thật -->
+      <div class="pane" id="pane-ai">
+        <div class="field" style="margin-bottom:12px">
+          <span style="display:block;font-size:12.5px;color:var(--muted);margin-bottom:4px;font-weight:600">Chức năng</span>
+          <div class="radios">
+            <label><input type="radio" name="aionly" value="" checked><div>Cả hai <small>YOLO đếm người + Gemini ra lệnh</small></div></label>
+            <label><input type="radio" name="aionly" value="counter"><div>Chỉ đếm người (YOLO)</div></label>
+            <label><input type="radio" name="aionly" value="llm"><div>Chỉ ra quyết định (Gemini + planner)</div></label>
+          </div>
+        </div>
+        <label class="field"><span>Nguồn ảnh (để trống = theo .env)</span>
+          <input type="text" id="source" list="sources" placeholder="esp32 / backend / webcam:0 / đường dẫn ảnh">
+          <datalist id="sources"><option value="esp32"><option value="backend"><option value="webcam:0"></datalist></label>
+        <div class="checks">
+          <label><input type="checkbox" id="aiShow"><div>Mở cửa sổ khung hình YOLO <small>Chỉ khi chọn "Chỉ đếm người"; nhấn q trong cửa sổ để đóng</small></div></label>
+          <label><input type="checkbox" id="aiDry"><div>Không gửi gì lên backend (dry-run)</div></label>
+        </div>
+        <div class="row">
+          <button class="btn" id="btnAI">▶ Chạy AI</button>
+          <button class="btn danger" data-stop>■ Dừng</button>
+        </div>
+        <p class="hint">Không chạy AI thật cùng lúc với demo giả lập — bảng điều khiển chỉ cho chạy một tiến trình.</p>
+      </div>
+
+      <!-- Thiết bị -->
+      <div class="pane" id="pane-dev">
+        <h2>Chế độ thiết bị</h2>
+        <div class="row" style="margin-bottom:8px">
+          <input type="text" id="user" placeholder="Tài khoản backend" style="flex:1;min-width:120px">
+          <input type="password" id="pass" placeholder="Mật khẩu" style="flex:1;min-width:120px">
+        </div>
+        <div class="row">
+          <button class="btn" id="btnAuto">Chuyển AUTO</button>
+          <button class="btn secondary" id="btnManual">Chuyển MANUAL</button>
+        </div>
+        <p class="hint" id="loginHint">AI chỉ điều khiển khi thiết bị ở AUTO.</p>
+
+        <h2 style="margin-top:18px">Kiểm tra kết nối</h2>
+        <div class="row">
+          <button class="btn secondary" id="btnCheck">Kiểm tra</button>
+          <button class="btn secondary" id="btnEnv">Mở file .env</button>
+        </div>
+        <ul class="checklist" id="checklist"></ul>
+        <dl class="kv" id="config"></dl>
+      </div>
+    </section>
+  </div>
+
+  <div class="col">
+    <section class="card">
+      <h2>Trạng thái phòng <span id="roomNote" style="font-weight:400;color:var(--muted);font-size:12.5px"></span></h2>
+      <div class="room">
+        <div class="metric"><div class="v" id="mTemp">--</div><div class="k">Nhiệt độ</div></div>
+        <div class="metric"><div class="v" id="mHum">--</div><div class="k">Độ ẩm</div></div>
+        <div class="metric"><div class="v" id="mPeople">--</div><div class="k">Số người</div></div>
+      </div>
+      <div class="devices">
+        <div class="dev fan" id="fan1"><svg viewBox="0 0 24 24" fill="currentColor"><g opacity=".85"><ellipse cx="12" cy="6.2" rx="2.7" ry="4.6"/><ellipse cx="12" cy="6.2" rx="2.7" ry="4.6" transform="rotate(120 12 12)"/><ellipse cx="12" cy="6.2" rx="2.7" ry="4.6" transform="rotate(240 12 12)"/></g><circle cx="12" cy="12" r="2.2"/></svg><div class="name">Quạt 1</div><div class="st">tắt</div></div>
+        <div class="dev fan" id="fan2"><svg viewBox="0 0 24 24" fill="currentColor"></svg><div class="name">Quạt 2</div><div class="st">tắt</div></div>
+        <div class="dev fan" id="fan3"><svg viewBox="0 0 24 24" fill="currentColor"></svg><div class="name">Quạt 3</div><div class="st">tắt</div></div>
+        <div class="dev ac" id="ac"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="2.5" y="5" width="19" height="8" rx="2"/><path d="M6 10h12M7 16v3M12 16v4M17 16v3"/></svg><div class="name">Điều hòa</div><div class="st">tắt</div></div>
+      </div>
+      <div class="reason" id="reason" style="display:none"></div>
+      <div class="updated" id="updated"></div>
+    </section>
+
+    <section class="card logcard">
+      <div class="loghead">
+        <h2>Nhật ký</h2>
+        <div class="row">
+          <label style="display:flex;gap:6px;align-items:center;font-size:12.5px;color:var(--muted)"><input type="checkbox" id="autoscroll" checked> Tự cuộn</label>
+          <button class="btn secondary" id="btnClear" style="padding:5px 10px">Xoá</button>
+        </div>
+      </div>
+      <div class="console" id="console"></div>
+    </section>
+  </div>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let lastLine = 0, running = false;
+
+// biểu tượng quạt dùng chung
+const fanSvg = $("fan1").querySelector("svg").innerHTML;
+["fan2", "fan3"].forEach(id => $(id).querySelector("svg").innerHTML = fanSvg);
+
+function toast(msg, ok = false) {
+  const t = $("toast"); t.textContent = msg; t.className = "toast" + (ok ? " info" : "");
+  t.style.display = "block"; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = "none", 4500);
+}
+async function api(path, body) {
+  const opt = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  const r = await fetch(path, opt);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail ? (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail)) : `HTTP ${r.status}`);
+  return data;
+}
+
+// ---- tab ----
+document.querySelectorAll(".tab").forEach(b => b.onclick = () => {
+  document.querySelectorAll(".tab").forEach(x => x.classList.toggle("active", x === b));
+  document.querySelectorAll(".pane").forEach(p => p.classList.toggle("active", p.id === "pane-" + b.dataset.tab));
+});
+
+// ---- thông tin ban đầu ----
+async function loadInfo() {
+  const info = await api("/api/info");
+  $("scenario").innerHTML = info.scenarios.map(s =>
+    `<option value="${s.name}">${s.name}${s.steps ? ` — ${s.steps} bước, ~${Math.round(s.seconds / 60 * 10) / 10} phút` : ""}</option>`).join("");
+  $("scenario").title = "";
+  const rows = [
+    ["Backend", info.backend_url], ["Nguồn ảnh", info.camera_source + (info.camera_source === "esp32" ? ` (${info.cam_ip})` : "")],
+    ["Gemini", info.gemini_key ? info.gemini_models.join(", ") : "chưa có API key"],
+    ["API key backend", `people: ${info.people_key ? "có" : "trống"}, ai: ${info.ai_key ? "có" : "trống"}`],
+    ["File .env", info.env_exists ? "có" : "chưa có (bấm Mở file .env để tạo)"],
+  ];
+  $("config").innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+}
+
+// ---- chạy / dừng ----
+$("btnSim").onclick = async () => {
+  try {
+    await api("/api/run/sim", {
+      scenario: $("scenario").value, mode: document.querySelector("input[name=simmode]:checked").value,
+      speed: parseFloat($("speed").value), dry_run: $("simDry").checked,
+      with_counter: $("simCounter").checked, real_people: $("simRealPeople").checked,
+    });
+    toast("Đã bắt đầu kịch bản", true); refresh();
+  } catch (e) { toast(e.message); }
+};
+$("btnAI").onclick = async () => {
+  try {
+    const only = document.querySelector("input[name=aionly]:checked").value || null;
+    await api("/api/run/ai", { only, source: $("source").value.trim() || null, show: $("aiShow").checked, dry_run: $("aiDry").checked });
+    toast("Đã chạy AI", true); refresh();
+  } catch (e) { toast(e.message); }
+};
+document.querySelectorAll("[data-stop]").forEach(b => b.onclick = async () => {
+  try { await api("/api/stop", {}); refresh(); } catch (e) { toast(e.message); }
+});
+async function setMode(mode) {
+  try {
+    await api("/api/mode", { mode, username: $("user").value.trim() || null, password: $("pass").value || null });
+    toast(`Đã chuyển ${mode}`, true); $("pass").value = ""; refresh();
+  } catch (e) { toast(e.message); }
+}
+$("btnAuto").onclick = () => setMode("AUTO");
+$("btnManual").onclick = () => setMode("MANUAL");
+$("btnCheck").onclick = async () => {
+  $("checklist").innerHTML = "<li>Đang kiểm tra…</li>";
+  try {
+    const { results } = await api("/api/check", {});
+    $("checklist").innerHTML = results.map(r =>
+      `<li><b class="${r.ok === null ? "" : r.ok ? "ok" : "bad"}">${r.ok === null ? "•" : r.ok ? "✓" : "✗"} ${r.name}</b><br><span style="color:var(--muted)">${r.detail}</span></li>`).join("");
+  } catch (e) { $("checklist").innerHTML = ""; toast(e.message); }
+};
+$("btnEnv").onclick = async () => {
+  try { const r = await api("/api/open-env", {}); toast(r.note, true); loadInfo(); } catch (e) { toast(e.message); }
+};
+$("btnClear").onclick = async () => { await api("/api/logs/clear", {}); $("console").innerHTML = ""; };
+
+// ---- trạng thái ----
+function setDev(id, on, text) {
+  const el = $(id); el.classList.toggle("on", !!on); el.querySelector(".st").textContent = text;
+}
+function chip(id, text, cls) { const c = $(id); c.textContent = text; c.className = "chip " + (cls || ""); }
+
+async function refresh() {
+  let st;
+  try { st = await api("/api/status"); } catch { chip("chipProc", "Mất kết nối bảng điều khiển", "bad"); return; }
+  const p = st.process, b = st.backend;
+  running = p.running;
+  chip("chipProc", p.running ? `Đang chạy: ${p.kind_text}` : (p.exit_code === null || p.exit_code === undefined ? "Không chạy" : `Đã dừng (mã ${p.exit_code})`),
+       p.running ? "run" : (p.exit_code ? "warn" : ""));
+  $("btnSim").disabled = $("btnAI").disabled = p.running;
+  document.querySelectorAll("[data-stop]").forEach(x => x.disabled = !p.running);
+
+  // tiến độ kịch bản
+  const pr = p.progress || {};
+  const showProg = p.kind === "sim" && (p.running || pr.done);
+  $("progress").style.display = showProg ? "block" : "none";
+  if (showProg && pr.total) {
+    const pct = pr.done ? 100 : Math.round((pr.step - 1) / pr.total * 100);
+    $("barFill").style.width = pct + "%";
+    $("progStep").textContent = pr.done ? "Hoàn thành" : `Bước ${pr.step}/${pr.total}: ${pr.name}`;
+    $("progCount").textContent = pr.done ? `Đạt ${pr.passed}/${pr.checked} bước` : "";
+  }
+  if (showProg && pr.last) {
+    $("progLast").style.display = "block";
+    $("progLast").innerHTML = `<b>${pr.last.label}</b> — ${pr.last.state} (~${pr.last.power} W) · giả lập ${pr.last.temperature}°C, ${pr.last.humidity}%`;
+  }
+
+  // backend + phòng
+  if (b && b.ok) {
+    const c = b.context;
+    chip("chipBackend", "Backend: kết nối", "ok");
+    chip("chipMode", "Thiết bị: " + c.mode, c.mode === "AUTO" ? "ok" : "warn");
+    // Đang chạy kịch bản: hiện số GIẢ LẬP (số AI đang dùng); còn lại: số thật từ backend
+    const simShown = p.kind === "sim" && p.running && pr.last;
+    const temp = simShown ? pr.last.temperature : c.temperature;
+    const hum = simShown ? pr.last.humidity : c.humidity;
+    const ppl = simShown && pr.people !== null && pr.people !== undefined ? pr.people : c.people_count;
+    $("mTemp").textContent = temp == null ? "--" : `${Number(temp).toFixed(1)}°C`;
+    $("mHum").textContent = hum == null ? "--" : `${Math.round(hum)}%`;
+    $("mPeople").textContent = ppl ?? "--";
+    document.querySelectorAll(".metric .k").forEach((k, i) =>
+      k.textContent = ["Nhiệt độ", "Độ ẩm", "Số người"][i] + (simShown ? " (giả lập)" : ""));
+    const fans = ["fan1", "fan2", "fan3"].map(k => c[k] ?? null);
+    if (fans.every(f => f === null) && c.fan_level !== undefined) [0, 1, 2].forEach(i => fans[i] = c.fan_level > i);
+    fans.forEach((on, i) => setDev("fan" + (i + 1), on, on ? "đang chạy" : "tắt"));
+    setDev("ac", c.ac_on, c.ac_on ? `bật ${c.ac_temp}°C` : "tắt");
+    if (c.ai_reason) {
+      let text = c.ai_reason, tags = "";
+      const re = /^\[([^\]]+)\]\s*/;
+      let m;
+      while ((m = text.match(re))) {
+        tags += `<span class="tag${m[1] === "Mô phỏng" ? " sim" : ""}">${m[1]}</span>`;
+        text = text.slice(m[0].length);
+      }
+      $("reason").style.display = "block"; $("reason").innerHTML = tags + text.replace(/</g, "&lt;");
+    } else $("reason").style.display = "none";
+    const offline = p.kind === "sim" && p.running && document.querySelector("input[name=simmode]:checked").value === "offline";
+    $("roomNote").textContent = offline ? "· tập dượt offline: quạt/điều hòa bên dưới là backend thật, không đổi theo kịch bản" :
+      (p.kind === "sim" && p.running ? "· đang chạy kịch bản giả lập" : "");
+    $("updated").textContent = "Cập nhật " + new Date().toLocaleTimeString("vi-VN");
+  } else {
+    chip("chipBackend", "Backend: " + (b ? b.error : "…"), "bad");
+    chip("chipMode", "Thiết bị: ?", "");
+    $("updated").textContent = b ? `Không đọc được trạng thái phòng (${b.error})` : "";
+  }
+  $("loginHint").textContent = st.logged_in ? `Đã đăng nhập: ${st.logged_in}. AI chỉ điều khiển khi thiết bị ở AUTO.` :
+    "Nhập tài khoản backend (lần đầu). AI chỉ điều khiển khi thiết bị ở AUTO.";
+}
+
+// ---- nhật ký ----
+function cls(text, src) {
+  if (src === "gui") return "gui";
+  if (/━━/.test(text)) return "head";
+  if (/✗|ERROR|Traceback|Lỗi|lỗi|401|500/.test(text)) return "bad";
+  if (/WARNING|⚠/.test(text)) return "warn";
+  if (/✓|Đạt \d+\/\d+/.test(text)) return "ok";
+  if (/→/.test(text)) return "act";
+  return "";
+}
+async function pollLogs() {
+  try {
+    const { lines } = await api(`/api/logs?since=${lastLine}`);
+    if (lines.length) {
+      const box = $("console"), frag = document.createDocumentFragment();
+      for (const l of lines) {
+        const div = document.createElement("div");
+        div.className = cls(l.text, l.src);
+        const t = document.createElement("span"); t.className = "t"; t.textContent = l.t;
+        div.append(t, document.createTextNode(l.text));
+        frag.append(div);
+        lastLine = l.n;
+      }
+      box.append(frag);
+      while (box.childNodes.length > 2500) box.removeChild(box.firstChild);
+      if ($("autoscroll").checked) box.scrollTop = box.scrollHeight;
+    }
+  } catch { /* bỏ qua, lần sau thử lại */ }
+}
+
+loadInfo().catch(e => toast(e.message));
+refresh(); pollLogs();
+setInterval(refresh, 1500);
+setInterval(pollLogs, 800);
+</script>
+</body>
+</html>

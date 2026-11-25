@@ -1,0 +1,44 @@
+diff --git a/backend/services/energy_service.py b/backend/services/energy_service.py
+index 5c60641..eee5586 100644
+--- a/backend/services/energy_service.py
++++ b/backend/services/energy_service.py
+@@ -11,7 +11,8 @@ Nguyên lý:
+   dùng giá trị mặc định bên dưới.
+ 
+ Giới hạn đã chốt với chủ dự án:
+-- Coi AC "bật = chạy hết công suất danh định" (không mô phỏng máy nén).
++- Điều hòa: công suất giảm theo nhiệt độ đặt, ~6%/°C so với mức 24°C (xem ac_power_factor),
++  khớp với mô hình planner của ai_service. Không mô phỏng máy nén bật/tắt theo chu kỳ.
+ - Khoảng cách giữa 2 log > MAX_INTERVAL_HOURS (backend dừng lâu) thì BỎ qua
+   khoảng đó để tránh cộng sai số lớn từ dữ liệu lỗi thời.
+ """
+@@ -42,6 +43,20 @@ DEVICE_NAMES = {
+ # Khoảng cách 2 log lớn hơn giá trị này (giờ) → bỏ qua, không tính điện
+ MAX_INTERVAL_HOURS = 1.0
+ 
++# Công suất điều hòa phụ thuộc nhiệt độ đặt (khớp với mô hình của ai_service/rules.py):
++#   P(T) = P_danh_định × max(0.4, 1 − 0.06 × (T − 24))
++# power_watts người dùng nhập được coi là công suất khi đặt 24°C; đặt cao hơn 1°C giảm ~6%.
++AC_REFERENCE_TEMP = 24
++AC_SAVING_PER_DEGREE = 0.06
++AC_MIN_FACTOR = 0.4
++
++
++def ac_power_factor(ac_temp: Optional[int]) -> float:
++    """Hệ số công suất điều hòa theo nhiệt độ đặt (24°C → 1.0, 26°C → 0.88, 28°C → 0.76)."""
++    if ac_temp is None:
++        return 1.0
++    return max(AC_MIN_FACTOR, 1.0 - AC_SAVING_PER_DEGREE * (ac_temp - AC_REFERENCE_TEMP))
++
+ 
+ def seed_device_info(db: Session) -> None:
+     """Đảm bảo device_info có đủ 4 row (chỉ thêm row còn thiếu)."""
+@@ -90,7 +105,7 @@ def accumulate_energy(db: Session, prev_log: Optional[SensorLog]) -> None:
+     if prev_log.fan3:
+         row.fan3_wh += power["fan3"] * delta_hours
+     if prev_log.ac_on:
+-        row.ac_wh   += power["ac"] * delta_hours
++        row.ac_wh   += power["ac"] * ac_power_factor(prev_log.ac_temp) * delta_hours
+ 
+     row.total_wh = row.fan1_wh + row.fan2_wh + row.fan3_wh + row.ac_wh
+ 

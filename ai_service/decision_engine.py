@@ -128,6 +128,7 @@ class DecisionEngine:
         self._rebuild_config()
         self._last_inputs: Optional[dict] = None
         self._last_call: float = 0.0
+        self._last_eval: float = 0.0          # lần cuối xem xét quyết định (kể cả khi giữ nguyên)
         self._last_seen_ac: Optional[bool] = None
         self._ac_changed_at: Optional[float] = None       # lần cuối AC đổi bật/tắt (monotonic)
         self._while_ac_off: Optional[tuple] = None        # (nhiệt độ, độ ẩm) đo gần nhất khi AC tắt
@@ -224,7 +225,7 @@ class DecisionEngine:
         if (inputs["people"] == 0 and inputs["device"][1] and self._empty_since is not None
                 and time.monotonic() - self._empty_since >= self.s.empty_ac_grace_seconds):
             return "phòng trống đủ lâu"
-        if time.monotonic() - self._last_call >= self.s.llm_max_interval:
+        if time.monotonic() - max(self._last_call, self._last_eval) >= self.s.llm_max_interval:
             return "đánh giá lại định kỳ"
         return None
 
@@ -287,6 +288,7 @@ class DecisionEngine:
         if people is None:
             logger.info("Số người không rõ (camera chưa gửi / dữ liệu cũ) → giữ nguyên trạng thái")
             self._remember(inputs)
+            self._last_eval = time.monotonic()
             return None
 
         self._last_call = time.monotonic()

@@ -20,6 +20,7 @@ ESP32-CAM ──JPEG──► [1] people_counter.py: YOLO → trung vị 5 khung
 | `main.py` | Chạy 2 chức năng song song, tham số dòng lệnh |
 | `people_counter.py` | **Chức năng 1** — lấy ảnh, YOLO đếm người, lọc trung vị, gửi backend |
 | `rules.py` | **Bộ lập kế hoạch tiện nghi – năng lượng**: mô hình nhiệt độ cảm nhận, hiệu ứng quạt, công suất; chọn tập quạt + AC |
+| `gui.py`, `gui/index.html` | **Bảng điều khiển** trên trình duyệt: chạy AI / demo, xem trạng thái phòng, chuyển AUTO/MANUAL |
 | `simulate.py`, `simulator.py` | **Giả lập kịch bản demo** (nhiệt độ/độ ẩm/số người thay đổi theo kịch bản) |
 | `scenarios/` | Kịch bản tự tạo dạng JSON (có file ví dụ) |
 | `device_profile.py` | **Hồ sơ thiết bị & sở thích** (công suất từng quạt, quạt/AC nào có, nhiệt độ mong muốn): mặc định → `.env` → backend |
@@ -30,6 +31,26 @@ ESP32-CAM ──JPEG──► [1] people_counter.py: YOLO → trung vị 5 khung
 | `docs/device_config_schema.json` | Mô tả các trường hồ sơ thiết bị (kiểu, mặc định, khoảng, nhãn, gợi ý) cho backend/Flutter làm form nhập |
 | `docs/backend_ai_v4.patch` | Bản vá cho backend: `/api/ai/context`, `/api/ai/command`, `ai_engine.py` sang `fan1/fan2/fan3` |
 | `tests/` | Unit test, backend giả v4 + Gemini giả, kịch bản end-to-end |
+
+## Bảng điều khiển (không cần gõ lệnh)
+
+```powershell
+cd IOT_SmartRoom\ai_service
+python gui.py          # tự mở trình duyệt tại http://127.0.0.1:8090
+```
+(Hoặc bấm đúp `chay_bang_dieu_khien.bat` nếu `python` đã có trong PATH.)
+
+| Khu vực | Làm được gì |
+|---|---|
+| **Demo giả lập** | Chọn kịch bản, chế độ (gửi lệnh thật / đẩy số giả lên backend / tập dượt offline), tốc độ → **Chạy kịch bản**; thanh tiến độ hiện bước hiện tại, quyết định mới nhất và kết quả ✓/✗ |
+| **Chạy AI thật** | Chạy `main.py`: cả hai chức năng / chỉ đếm người (có thể mở cửa sổ khung hình YOLO) / chỉ ra quyết định |
+| **Thiết bị & kiểm tra** | Đăng nhập backend → **Chuyển AUTO / MANUAL**; **Kiểm tra** backend, API AI v4, chế độ, camera, Gemini key, API key; mở file `.env` |
+| **Trạng thái phòng** | Nhiệt độ, độ ẩm, số người, quạt 1–3 (quay khi bật), điều hòa, lý do AI kèm nhãn `[Mô phỏng]` / `[Gemini]`… (khi chạy kịch bản thì hiện số giả lập) |
+| **Nhật ký** | Log trực tiếp của tiến trình đang chạy, tô màu lỗi / cảnh báo / ✓ |
+
+- Chỉ chạy **một** tiến trình tại một thời điểm (AI thật và demo giả lập không chạy cùng lúc). Đóng cửa sổ `gui.py` sẽ dừng luôn tiến trình đang chạy.
+- `python gui.py --host 0.0.0.0` để mở từ điện thoại cùng mạng (bảng điều khiển **không có đăng nhập**, chỉ dùng trong mạng tin cậy).
+- Sửa `.env` xong thì tắt và chạy lại `gui.py`.
 
 ## Cài đặt & chạy
 
