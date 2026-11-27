@@ -346,6 +346,21 @@ def test_engine_reads_profile_from_backend_config():
     assert "không có điều hòa" in eng.system_prompt.lower() or "KHÔNG có điều hòa" in eng.system_prompt
 
 
+def test_engine_rechecks_ac_when_compressor_lock_expires_and_warns_external_change(caplog=None):
+    import time as _t
+    be = FakeBackend(_ctx(temperature=31.0))
+    eng = _engine(be, None, ac_min_off_seconds=0.3, ac_min_on_seconds=0.3, llm_max_interval=120)
+    assert eng.step().ac_on is True
+    be.ctx.update(ac_on=False)                      # AI nội bộ của backend tắt AC
+    with mock.patch("decision_engine.logger.warning") as warn:
+        d = eng.step()
+        assert warn.called                           # cảnh báo bị ghi đè từ bên ngoài
+    assert d.ac_on is False and all(d.fans)          # khoá máy nén → tạm bật hết quạt
+    _t.sleep(0.35)
+    d = eng.step()                                   # hết khoá → tự quyết định lại, không chờ định kỳ
+    assert d is not None and d.ac_on is True
+
+
 # ---------------- bộ giả lập demo ----------------
 def test_simulator_offline_scenarios_reach_expected_modes():
     import simulator
@@ -400,6 +415,38 @@ def test_engine_reads_power_from_devices_info_api():
     assert be.sent[-1][1] is True
     best, steady, _ = rules.plan(30.0, 72.0, 2, OFF, eng.cfg)
     assert steady.label == "chỉ điều hòa"   # AC inverter rất tiết kiệm → không cần kèm quạt
+
+
+def test_gui_events_build_run_state(monkeypatch, capsys):
+    """simulate.py in @@EVENT → gui.RunState dựng lại bước kịch bản / quyết định / cảnh báo."""
+    import events
+    import gui
+    import simulator
+    monkeypatch.setenv("GUI_EVENTS", "1")
+    events._active.clear()
+    s = Settings()
+    s.decision_log_path, s.llm_min_interval, s.decision_check_interval = "", 0, 0.05
+    name, title, steps = simulator.load_scenario("chi-dieu-hoa")
+    sim = simulator.SimulatedBackend(simulator.InMemoryBackend(), "offline")
+    eng = DecisionEngine(s, sim, None)
+    events.emit("scenario_start", mode="offline", speed=100, **simulator.scenario_event(name, title, steps))
+    events.alert("x", "warn", "Thử")
+    events.alert("x", "warn", "Thử")          # trùng → không in lại
+    events.clear_alert("x")
+    events.clear_alert("x")                   # đã xoá → không in lại
+    simulator.run_scenario(eng, sim, steps, speed=100, tick=0.05, printer=lambda *_: None)
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith(events.PREFIX)]
+    assert sum('"type": "alert"' in ln for ln in lines) == 1
+    assert sum('"alert_clear"' in ln for ln in lines) == 1
+    run = gui.RunState()
+    import json
+    for ln in lines:
+        run.apply(json.loads(ln[len(events.PREFIX):]))
+    d = run.to_dict()
+    assert [st["status"] for st in d["scenario"]["steps"]] == ["ok", "ok", "ok"]
+    assert [st["result"] for st in d["scenario"]["steps"]] == ["tắt hết", "chỉ điều hòa", "kết hợp"]
+    assert d["feed"] and d["feed"][0]["step"] == 3 and d["device"]["ac_on"] is True
+    assert d["alerts"] == []
 
 
 if __name__ == "__main__":

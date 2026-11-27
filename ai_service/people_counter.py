@@ -21,6 +21,7 @@ import requests
 
 from backend_client import BackendClient, BackendError
 from config import Settings
+import events
 
 logger = logging.getLogger("counter")
 
@@ -179,6 +180,8 @@ def run_counter_loop(
 
                 elapsed_ms = (time.monotonic() - started) * 1000
                 logger.info("YOLO: thô=%d → làm mượt=%d (%.0f ms)", raw_count, smoothed, elapsed_ms)
+                events.emit("people", raw=raw_count, count=smoothed, ms=round(elapsed_ms))
+                events.clear_alert("camera")
 
                 if settings.debug_frame_path or show:
                     annotated = result.plot()
@@ -206,6 +209,9 @@ def run_counter_loop(
             except Exception as exc:  # camera mất kết nối, ảnh hỏng...
                 consecutive_errors += 1
                 logger.warning("Lỗi đếm người (%d lần liên tiếp): %s", consecutive_errors, exc)
+                if consecutive_errors >= 2:
+                    events.alert("camera", "error", "Camera không đọc được", str(exc)[:200],
+                                 "Kiểm tra CAM_IP trong .env, ESP32-CAM đã cắm điện và cùng mạng.")
                 if consecutive_errors >= 3:
                     # Không gửi số cũ: để people_updated_at cũ đi, bộ quyết định sẽ biết dữ liệu không tin cậy
                     smoother.reset()

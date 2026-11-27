@@ -15,8 +15,8 @@ Chức năng:
 Bảng điều khiển chỉ chạy MỘT tiến trình tại một thời điểm (main.py và simulate.py không được chạy cùng lúc).
 """
 import argparse
+import json
 import os
-import re
 import subprocess
 import sys
 import threading
@@ -33,12 +33,75 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from config import BASE_DIR, settings
+import events
 import simulator
 
 GUI_DIR = BASE_DIR / "gui"
-STEP_RE = re.compile(r"━━ Bước (\d+)/(\d+): (.+?) ━━.*?người: ([^ ]+)")
-SUMMARY_RE = re.compile(r"Đạt (\d+)/(\d+) bước")
-DECISION_RE = re.compile(r"→ \[(\w+)\] (.+?): (.+?)  \(~(\d+) W\)  T=([\d.]+) H=([\d.]+)")
+
+
+class RunState:
+    """Trạng thái có cấu trúc của tiến trình đang chạy, dựng từ các dòng @@EVENT (xem events.py)."""
+
+    def __init__(self):
+        self.scenario: Optional[dict] = None
+        self.current = 0
+        self.frac = 0.0
+        self.values: dict = {}
+        self.device: Optional[dict] = None
+        self.feed: deque = deque(maxlen=40)
+        self.keep: Optional[dict] = None
+        self.alerts: dict = {}
+        self.summary: Optional[dict] = None
+        self.people: Optional[dict] = None
+        self.n_decisions = 0
+
+    def apply(self, ev: dict) -> None:
+        t = ev.get("type")
+        if t == "scenario_start":
+            ev["steps"] = [{**st, "status": "pending"} for st in ev.get("steps", [])]
+            self.scenario, self.current, self.summary = ev, 0, None
+        elif t == "step_start" and self.scenario:
+            self.current, self.frac = ev["i"], 0.0
+            step = self.scenario["steps"][ev["i"] - 1]
+            step.update(status="running", started=ev["ts"], run_seconds=ev.get("duration"))
+        elif t == "tick":
+            self.frac = ev.get("frac", 0.0)
+            self.values = {k: ev.get(k) for k in ("temperature", "humidity", "people")}
+            if ev.get("device"):
+                self.device = ev["device"]
+        elif t == "step_end" and self.scenario:
+            step = self.scenario["steps"][ev["i"] - 1]
+            ok = ev.get("ok")
+            step.update(status="ok" if ok else ("fail" if ok is False else "done"), result=ev.get("label"),
+                        device=ev.get("device"), manual=ev.get("manual"))
+            if ev.get("device"):
+                self.device = ev["device"]
+        elif t == "summary":
+            self.summary = ev
+            self.current = 0
+        elif t == "decision":
+            self.n_decisions += 1
+            ev["step"] = self.current or None
+            self.feed.appendleft(ev)
+            self.keep = None
+            self.device = {"fans": ev["fans"], "ac_on": ev["ac_on"], "ac_temp": ev["ac_temp"],
+                           "label": ev.get("label")} if (ev.get("sent") or ev.get("dry_run")) else self.device
+            self.values = {"temperature": ev.get("temperature"), "humidity": ev.get("humidity"),
+                           "people": ev.get("people")}
+        elif t == "keep":
+            self.keep = ev
+        elif t == "people":
+            self.people = ev
+        elif t == "alert":
+            self.alerts[ev["key"]] = ev
+        elif t == "alert_clear":
+            self.alerts.pop(ev.get("key"), None)
+
+    def to_dict(self) -> dict:
+        return {"scenario": self.scenario, "current": self.current, "frac": self.frac, "values": self.values,
+                "device": self.device, "feed": list(self.feed), "keep": self.keep,
+                "alerts": sorted(self.alerts.values(), key=lambda a: a["ts"]), "summary": self.summary,
+                "people": self.people, "n_decisions": self.n_decisions}
 
 
 # ======================================================================
@@ -51,7 +114,7 @@ class ProcessManager:
         self.cmd: list[str] = []
         self.started_at: Optional[str] = None
         self.exit_code: Optional[int] = None
-        self.progress: dict = {}
+        self.run = RunState()
         self.lines: deque = deque(maxlen=max_lines)
         self.line_no = 0
         self.lock = threading.Lock()
@@ -70,34 +133,29 @@ class ProcessManager:
         if self.running:
             raise HTTPException(409, f"Đang chạy {self.kind_text()} — bấm Dừng trước.")
         cmd = [sys.executable, "-u", script, *args]
-        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1", "GUI_EVENTS": "1"}
         flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
         self.proc = subprocess.Popen(cmd, cwd=BASE_DIR, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                      env=env, text=True, encoding="utf-8", errors="replace", bufsize=1,
                                      creationflags=flags)
         self.kind, self.cmd, self.exit_code = kind, cmd, None
         self.started_at = datetime.now().strftime("%H:%M:%S")
-        self.progress = {}
+        self.run = RunState()
         self.log(f"▶ Bắt đầu: python {' '.join(cmd[2:])}")
         threading.Thread(target=self._reader, args=(self.proc,), daemon=True).start()
 
     def _reader(self, proc: subprocess.Popen) -> None:
+        run = self.run
         for line in proc.stdout:
+            if line.startswith(events.PREFIX):
+                try:
+                    ev = json.loads(line[len(events.PREFIX):])
+                    with self.lock:
+                        run.apply(ev)
+                except (ValueError, KeyError, IndexError, TypeError):
+                    pass
+                continue
             self.log(line, "proc")
-            m = STEP_RE.search(line)
-            if m:
-                people = m.group(4)
-                self.progress = {**self.progress, "step": int(m.group(1)), "total": int(m.group(2)),
-                                 "name": m.group(3), "people": int(people) if people.isdigit() else None}
-            m = DECISION_RE.search(line)
-            if m:
-                self.progress = {**self.progress, "last": {
-                    "source": m.group(1), "label": m.group(2), "state": m.group(3), "power": int(m.group(4)),
-                    "temperature": float(m.group(5)), "humidity": float(m.group(6))}}
-            m = SUMMARY_RE.search(line)
-            if m:
-                self.progress = {**self.progress, "passed": int(m.group(1)), "checked": int(m.group(2)),
-                                 "done": True}
         code = proc.wait()
         if proc is self.proc:
             self.exit_code = code
@@ -118,7 +176,7 @@ class ProcessManager:
 
     def status(self) -> dict:
         return {"running": self.running, "kind": self.kind, "kind_text": self.kind_text(),
-                "started_at": self.started_at, "exit_code": self.exit_code, "progress": self.progress,
+                "started_at": self.started_at, "exit_code": self.exit_code,
                 "cmd": " ".join(self.cmd[2:]) if self.cmd else ""}
 
     def logs_since(self, since: int) -> list[dict]:
@@ -164,12 +222,16 @@ def index():
 
 @app.get("/api/info")
 def info():
-    scenarios = [{"name": name, "title": data["title"], "steps": len(data["steps"]),
-                  "seconds": sum(s["duration"] for s in data["steps"])}
-                 for name, data in simulator.SCENARIOS.items()]
-    for path in sorted((BASE_DIR / "scenarios").glob("*.json")):
-        scenarios.append({"name": f"scenarios/{path.name}", "title": f"File: {path.name}", "steps": None,
-                          "seconds": None})
+    scenarios = []
+    names = list(simulator.SCENARIOS) + [f"scenarios/{p.name}" for p in sorted((BASE_DIR / "scenarios").glob("*.json"))]
+    for name in names:
+        try:
+            key, title, steps = simulator.load_scenario(name if name in simulator.SCENARIOS else str(BASE_DIR / name))
+        except Exception as exc:  # noqa: BLE001 — file kịch bản viết sai
+            scenarios.append({"name": name, "title": f"Lỗi file: {exc}", "steps": [], "seconds": 0})
+            continue
+        ev = simulator.scenario_event(name, title, steps)
+        scenarios.append({**ev, "seconds": sum(s.duration for s in steps)})
     return {
         "backend_url": settings.backend_url,
         "camera_source": settings.camera_source,
@@ -200,7 +262,9 @@ def status():
         except requests.RequestException as exc:
             backend = {"ok": False, "error": f"Không kết nối được: {type(exc).__name__}"}
         _cache.update(at=now, data=backend)
-    return {"process": pm.status(), "backend": _cache["data"], "logged_in": backend_token["user"]}
+    with pm.lock:
+        run = pm.run.to_dict()
+    return {"process": pm.status(), "run": run, "backend": _cache["data"], "logged_in": backend_token["user"]}
 
 
 @app.get("/api/logs")

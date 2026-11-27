@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 from backend_client import BackendError
+import events
 
 logger = logging.getLogger("simulator")
 
@@ -263,6 +264,20 @@ def classify_state(ctx: dict) -> str:
     return "chỉ quạt" if fans else "tắt hết"
 
 
+def device_state(ctx: dict) -> dict:
+    return {"fans": [bool(ctx.get(k)) for k in ("fan1", "fan2", "fan3")], "ac_on": bool(ctx.get("ac_on")),
+            "ac_temp": ctx.get("ac_temp"), "label": classify_state(ctx), "mode": ctx.get("mode")}
+
+
+def scenario_event(name: str, title: str, steps: list) -> dict:
+    """Mô tả kịch bản cho giao diện (sự kiện scenario_start)."""
+    def rng(v):
+        return [float(v[0]), float(v[-1])] if isinstance(v, (list, tuple)) else float(v)
+    return {"name": name, "title": title, "steps": [
+        {"name": s.name, "temperature": rng(s.temperature), "humidity": rng(s.humidity), "people": s.people,
+         "note": s.note, "expect": list(s.expect), "duration": s.duration} for s in steps]}
+
+
 def state_text(ctx: dict) -> str:
     fans = [str(i) for i, k in enumerate(("fan1", "fan2", "fan3"), start=1) if ctx.get(k)]
     fan = f"quạt {','.join(fans)}" if fans else "không quạt"
@@ -301,6 +316,7 @@ def run_scenario(engine, sim: SimulatedBackend, steps: list[Step], speed: float 
         printer(f"━━ Bước {idx}/{len(steps)}: {step.name} ━━  {t_text}°C, {h_text}%, người: {ppl}  ({duration:.0f}s)")
         if step.note:
             printer(f"   {step.note}")
+        events.emit("step_start", i=idx, duration=round(duration, 1))
 
         started = time.monotonic()
         n_decisions = 0
@@ -311,6 +327,14 @@ def run_scenario(engine, sim: SimulatedBackend, steps: list[Step], speed: float 
             temp, hum = step.values_at(frac)
             sim.set_values(temp, hum, step.people)
             decision = engine.step()
+            if events.enabled():
+                try:
+                    now_ctx = sim.get_context()
+                except BackendError:
+                    now_ctx = {}
+                events.emit("tick", i=idx, frac=round(min(1.0, frac), 3), temperature=temp, humidity=hum,
+                            people=step.people if step.people is not None else now_ctx.get("people_count"),
+                            device=device_state(now_ctx) if now_ctx else None)
             if decision is not None:
                 n_decisions += 1
                 last_reason = decision.ai_reason
@@ -329,6 +353,8 @@ def run_scenario(engine, sim: SimulatedBackend, steps: list[Step], speed: float 
         ok = (label in step.expect) if step.expect else None
         mark = "" if ok is None else ("✓" if ok else f"✗ (mong đợi: {', '.join(step.expect)})")
         printer(f"   Kết thúc bước: {state} → {label} {mark}")
+        events.emit("step_end", i=idx, label=label, ok=ok, device=device_state(ctx), decisions=n_decisions,
+                    manual=ctx.get("mode") != "AUTO")
         results.append(StepResult(step.name, temp, hum, step.people, state, label, step.expect, ok,
                                   n_decisions, last_reason))
     return results

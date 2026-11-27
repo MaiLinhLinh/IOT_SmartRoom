@@ -20,7 +20,7 @@ ESP32-CAM ──JPEG──► [1] people_counter.py: YOLO → trung vị 5 khung
 | `main.py` | Chạy 2 chức năng song song, tham số dòng lệnh |
 | `people_counter.py` | **Chức năng 1** — lấy ảnh, YOLO đếm người, lọc trung vị, gửi backend |
 | `rules.py` | **Bộ lập kế hoạch tiện nghi – năng lượng**: mô hình nhiệt độ cảm nhận, hiệu ứng quạt, công suất; chọn tập quạt + AC |
-| `gui.py`, `gui/index.html` | **Bảng điều khiển** trên trình duyệt: chạy AI / demo, xem trạng thái phòng, chuyển AUTO/MANUAL |
+| `gui.py`, `gui/index.html`, `events.py` | **Bảng điều khiển** trên trình duyệt: chạy AI / demo, xem trạng thái phòng, các bước kịch bản, quyết định AI, cảnh báo; chuyển AUTO/MANUAL |
 | `simulate.py`, `simulator.py` | **Giả lập kịch bản demo** (nhiệt độ/độ ẩm/số người thay đổi theo kịch bản) |
 | `scenarios/` | Kịch bản tự tạo dạng JSON (có file ví dụ) |
 | `device_profile.py` | **Hồ sơ thiết bị & sở thích** (công suất từng quạt, quạt/AC nào có, nhiệt độ mong muốn): mặc định → `.env` → backend |
@@ -42,11 +42,16 @@ python gui.py          # tự mở trình duyệt tại http://127.0.0.1:8090
 
 | Khu vực | Làm được gì |
 |---|---|
-| **Demo giả lập** | Chọn kịch bản, chế độ (gửi lệnh thật / đẩy số giả lên backend / tập dượt offline), tốc độ → **Chạy kịch bản**; thanh tiến độ hiện bước hiện tại, quyết định mới nhất và kết quả ✓/✗ |
-| **Chạy AI thật** | Chạy `main.py`: cả hai chức năng / chỉ đếm người (có thể mở cửa sổ khung hình YOLO) / chỉ ra quyết định |
-| **Thiết bị & kiểm tra** | Đăng nhập backend → **Chuyển AUTO / MANUAL**; **Kiểm tra** backend, API AI v4, chế độ, camera, Gemini key, API key; mở file `.env` |
-| **Trạng thái phòng** | Nhiệt độ, độ ẩm, số người, quạt 1–3 (quay khi bật), điều hòa, lý do AI kèm nhãn `[Mô phỏng]` / `[Gemini]`… (khi chạy kịch bản thì hiện số giả lập) |
-| **Nhật ký** | Log trực tiếp của tiến trình đang chạy, tô màu lỗi / cảnh báo / ✓ |
+| **Demo** | Chọn kịch bản, chế độ (Gửi lệnh thật / Đẩy số giả / Tập dượt), tốc độ → **Chạy kịch bản** (nút đổi thành **Dừng** khi đang chạy) |
+| **AI thật** | Chạy `main.py`: cả hai / chỉ đếm người / chỉ ra quyết định |
+| **Thiết bị** | Đăng nhập → **AUTO / MANUAL**; **Kiểm tra** backend, API AI v4, camera, Gemini key, API key; mở `.env` |
+| **Cảnh báo** | Thẻ đỏ/vàng kèm cách sửa: không kết nối backend, sai API key, MANUAL, cảm biến/camera ngừng, thiết bị bị bên khác ghi đè… |
+| **Phòng** | Chế độ hiện tại (Tắt hết / Chỉ quạt / Kết hợp / Chỉ điều hòa / Làm mát nhanh / Chờ tắt) + công suất ước tính và % tiết kiệm; nhiệt độ, độ ẩm, số người, quạt 1–3, điều hòa, lý do AI |
+| **Kịch bản** | Các bước dạng dòng thời gian: điều kiện, chế độ mong đợi, bước đang chạy (thanh tiến độ, thời gian còn lại, quyết định AI), kết quả ✓/✗ và tổng kết `Đạt x/y` |
+| **Hoạt động AI** | Từng quyết định: nguồn (Gemini / Planner / Tự động), chế độ, thiết bị, công suất, lý do, nguyên nhân kích hoạt |
+| **Nhật ký kỹ thuật** | Log đầy đủ (thu gọn mặc định, tự mở khi có lỗi chương trình) |
+
+Giao diện đọc các dòng `@@EVENT {...}` mà `main.py` / `simulate.py` in ra khi chạy từ `gui.py` (biến `GUI_EVENTS=1`, xem `events.py`); chạy bằng dòng lệnh thì không có các dòng này.
 
 - Chỉ chạy **một** tiến trình tại một thời điểm (AI thật và demo giả lập không chạy cùng lúc). Đóng cửa sổ `gui.py` sẽ dừng luôn tiến trình đang chạy.
 - `python gui.py --host 0.0.0.0` để mở từ điện thoại cùng mạng (bảng điều khiển **không có đăng nhập**, chỉ dùng trong mạng tin cậy).

@@ -29,6 +29,7 @@ from config import Settings
 from llm_client import GeminiClient, LLMError
 from prompts import RESPONSE_SCHEMA, build_system_prompt, build_user_prompt
 import device_profile
+import events
 import rules
 from rules import fans_text
 
@@ -83,6 +84,21 @@ def parse_fans(ctx: dict) -> tuple:
     return tuple(i < level for i in range(3))
 
 
+def _backend_hint(msg: str, url: str) -> str:
+    if "401" in msg:
+        return "API key sai: PEOPLE_API_KEY / AI_API_KEY trong ai_service/.env phải giống backend/.env."
+    if "500" in msg:
+        return "Lỗi phía backend — xem log backend."
+    if "localhost" in url or "127.0.0.1" in url:
+        return "BACKEND_URL đang là máy này nhưng không có backend. Sửa .env thành IP máy chạy backend."
+    return "Kiểm tra backend đang chạy, đúng IP/cổng, cùng mạng."
+
+
+def _dev_text(dev: tuple) -> str:
+    fans, ac_on, ac_temp = dev
+    return f"{fans_text(fans)}, " + (f"AC {ac_temp}°C" if ac_on else "AC tắt")
+
+
 def validate_decision(raw: dict, current_ac_temp: int, ac_min: int, ac_max: int,
                       max_fans: int = 3, ac_available: bool = True) -> dict:
     """Kiểm tra JSON của LLM, kẹp về khoảng hợp lệ. Thiếu field → ValueError."""
@@ -131,6 +147,9 @@ class DecisionEngine:
         self._last_eval: float = 0.0          # lần cuối xem xét quyết định (kể cả khi giữ nguyên)
         self._last_seen_ac: Optional[bool] = None
         self._ac_changed_at: Optional[float] = None       # lần cuối AC đổi bật/tắt (monotonic)
+        self._recheck_at: Optional[float] = None          # hết khoá máy nén → quyết định lại ngay
+        self._expected_device: Optional[tuple] = None     # trạng thái ai_service vừa gửi
+        self._last_external_warn: float = 0.0
         self._while_ac_off: Optional[tuple] = None        # (nhiệt độ, độ ẩm) đo gần nhất khi AC tắt
         self._natural: Optional[tuple] = None             # (nhiệt độ, độ ẩm "tự nhiên", thời điểm)
         self._empty_since: Optional[float] = None
@@ -220,6 +239,8 @@ class DecisionEngine:
         if (inputs["humidity"] is not None and last["humidity"] is not None
                 and abs(inputs["humidity"] - last["humidity"]) >= self.s.humidity_delta):
             return f"độ ẩm đổi {last['humidity']:.0f} → {inputs['humidity']:.0f}%"
+        if self._recheck_at is not None and time.monotonic() >= self._recheck_at:
+            return "hết thời gian bảo vệ máy nén điều hòa"
         if inputs["device"] != last["device"]:
             return "trạng thái thiết bị bị thay đổi từ bên ngoài"
         if (inputs["people"] == 0 and inputs["device"][1] and self._empty_since is not None
@@ -235,24 +256,35 @@ class DecisionEngine:
             ctx = self.backend.get_context()
         except BackendError as exc:
             logger.warning("Không lấy được context: %s", exc)
+            events.alert("context", "error", "Không đọc được dữ liệu từ backend",
+                         "Không có phản hồi" if "lỗi kết nối" in str(exc) else str(exc)[:160],
+                         _backend_hint(str(exc), self.s.backend_url))
             return None
+        events.clear_alert("context")
 
         if ctx.get("mode") != "AUTO":
             if self._last_inputs is not None:
                 logger.info("Thiết bị chuyển sang %s → tạm dừng AI", ctx.get("mode"))
+            events.alert("manual", "warn", f"Thiết bị đang {ctx.get('mode')} — AI tạm dừng",
+                         "", "Chuyển AUTO ở tab Thiết bị (hoặc trên app).")
             self._last_inputs = None
             return None
+        events.clear_alert("manual")
 
         self._update_profile(ctx)
         temperature = ctx.get("temperature")
         if temperature is None:
             logger.info("Chưa có dữ liệu nhiệt độ từ ESP32 → bỏ qua")
+            events.alert("sensor", "warn", "Chưa có nhiệt độ từ ESP32", "", "Kiểm tra ESP32 + DHT11 đã gửi /api/sensor.")
             return None
         temperature = float(temperature)
         sensor_age = age_seconds(ctx.get("sensor_timestamp"))
         if sensor_age is not None and sensor_age > self.s.sensor_stale_seconds:
             logger.warning("Dữ liệu cảm biến đã cũ %.0fs → không ra quyết định", sensor_age)
+            events.alert("sensor", "warn", "Cảm biến ngừng cập nhật", "AI tạm không ra lệnh.",
+                         "Kiểm tra ESP32 còn kết nối WiFi / backend.")
             return None
+        events.clear_alert("sensor")
 
         people_age = age_seconds(ctx.get("people_updated_at"))
         people_fresh = people_age is not None and people_age <= self.s.people_stale_seconds
@@ -267,6 +299,7 @@ class DecisionEngine:
             "ac_on": _to_bool(ctx.get("ac_on", False)),
             "ac_temp": int(ctx.get("ac_temp") or 26),
         }
+        self._check_external_change(current)
         self._observe(temperature, humidity, current["ac_on"])
         if people == 0:
             self._empty_since = self._empty_since or time.monotonic()
@@ -287,11 +320,15 @@ class DecisionEngine:
 
         if people is None:
             logger.info("Số người không rõ (camera chưa gửi / dữ liệu cũ) → giữ nguyên trạng thái")
+            events.alert("people", "warn", "Chưa có số người", "AI giữ nguyên thiết bị.",
+                         "Bật YOLO đếm người (Chạy AI thật → Cả hai).")
             self._remember(inputs)
             self._last_eval = time.monotonic()
             return None
 
+        events.clear_alert("people")
         self._last_call = time.monotonic()
+        self._recheck_at = None
         natural = self._natural_estimate() if current["ac_on"] else (None, None)
         best, steady, options = rules.plan(temperature, humidity, people, current, self.cfg, *natural)
         logger.info("Ra quyết định (%s): người=%d T=%.1f H=%s | hiện tại %s, AC %s | planner: %s (%s, ~%.0f W)",
@@ -306,6 +343,8 @@ class DecisionEngine:
             # Tối ưu: planner xác nhận trạng thái hiện tại vẫn tối ưu → không gọi Gemini, không gửi lệnh
             logger.info("Trạng thái hiện tại vẫn là phương án tốt nhất (%s) → giữ nguyên, không gọi Gemini",
                         best.label)
+            events.emit("keep", label=best.label, power=round(best.power_w), temperature=temperature,
+                        humidity=humidity, people=people)
             self._remember(inputs)
             return None
 
@@ -324,7 +363,7 @@ class DecisionEngine:
                                     ai_reason=rules.explain(best, temperature, humidity, people, self.cfg),
                                     source="RULE", mode_label=best.label)
 
-        self._apply_ac_timing(decision, current)
+        held = self._apply_ac_timing(decision, current)
         if decision.fan_count == best.fans:
             decision.fans = best.fan_set
         else:
@@ -353,14 +392,26 @@ class DecisionEngine:
             except BackendError as exc:
                 send_error = str(exc)
                 logger.warning("Không gửi được lệnh: %s", exc)
+                events.alert("send", "error", "Không gửi được lệnh", send_error,
+                             _backend_hint(send_error, self.s.backend_url))
+        if sent:
+            events.clear_alert("send")
 
         if sent:
+            self._expected_device = (tuple(decision.fans), decision.ac_on, decision.ac_temp)
             self._observe(temperature, humidity, decision.ac_on)
             device = (decision.fans, decision.ac_on, decision.ac_temp)
         else:
             device = inputs["device"]
         self._remember({**inputs, "device": device})
         self._write_log(why, inputs, current, best, steady, decision, latency, llm_error, sent, send_error)
+        events.emit("decision", source=decision.source, label=decision.mode_label, fans=list(decision.fans),
+                    ac_on=decision.ac_on, ac_temp=decision.ac_temp, power=round(decision.est_power_w),
+                    baseline=round(rules.baseline_power(temperature, humidity, people, self.cfg)), reason=decision.ai_reason, trigger=why,
+                    temperature=temperature, humidity=humidity, people=people, sent=sent,
+                    dry_run=self.s.dry_run, send_error=send_error, llm_error=llm_error, latency=latency,
+                    model=getattr(self.llm, "last_model", None) if decision.source == "GEMINI" else None,
+                    held=held)
         return decision
 
     # ---------- các nhánh quyết định ----------
@@ -426,20 +477,47 @@ class DecisionEngine:
                              f"(tối thiểu {self.s.ac_min_off_seconds / 60:.0f} phút) — dùng quạt tạm")
         return notes
 
-    def _apply_ac_timing(self, d: Decision, current: dict) -> None:
-        """Bảo vệ máy nén: không đổi bật/tắt AC khi chưa đủ thời gian tối thiểu."""
-        if self._ac_changed_at is None or d.ac_on == current["ac_on"]:
+    def _check_external_change(self, current: dict) -> None:
+        """Quạt/AC bị đổi mà không phải do ai_service gửi (đang AUTO) → thường là AI nội bộ của backend
+        (AI_ENGINE_ENABLED=true) ghi đè theo nhiệt độ THẬT của cảm biến: quạt/AC lệch nhau, AC bị trễ."""
+        expected = self._expected_device
+        if expected is None:
             return
+        now_dev = (tuple(current["fans"]), current["ac_on"], current["ac_temp"] if current["ac_on"] else expected[2])
+        exp_dev = (expected[0], expected[1], expected[2])
+        if now_dev != exp_dev:
+            self._expected_device = None
+            if time.monotonic() - self._last_external_warn > 30:
+                self._last_external_warn = time.monotonic()
+                logger.warning("Quạt/điều hòa bị thay đổi bởi bên khác (không phải ai_service): mong đợi %s, "
+                               "backend đang là %s. Nếu không ai bấm tay trên app thì AI nội bộ của backend "
+                               "đang ghi đè → đặt AI_ENGINE_ENABLED=false trong backend/.env rồi khởi động lại.",
+                               _dev_text(exp_dev), _dev_text(now_dev))
+                events.alert("external", "warn", "Thiết bị bị đổi bởi bên khác",
+                             f"AI gửi {_dev_text(exp_dev)}, backend đang {_dev_text(now_dev)}.",
+                             "Nếu không ai bấm trên app: đặt AI_ENGINE_ENABLED=false trong backend/.env.")
+
+    def _apply_ac_timing(self, d: Decision, current: dict) -> Optional[float]:
+        """Bảo vệ máy nén: không đổi bật/tắt AC khi chưa đủ thời gian tối thiểu.
+        Trả về số giây còn phải chờ nếu phải hoãn, None nếu không."""
+        if self._ac_changed_at is None or d.ac_on == current["ac_on"]:
+            return None
         elapsed = time.monotonic() - self._ac_changed_at
         if current["ac_on"] and elapsed < self.s.ac_min_on_seconds and d.source != "AUTO":
             d.ac_on, d.ac_temp = True, current["ac_temp"]
             d.ai_reason += " (Giữ điều hòa: chưa đủ thời gian chạy tối thiểu.)"
+            self._recheck_at = self._ac_changed_at + self.s.ac_min_on_seconds
         elif not current["ac_on"] and elapsed < self.s.ac_min_off_seconds:
             d.ac_on, d.fan_count = False, self.cfg.max_fans
-            d.ai_reason += " (Tạm bật hết quạt: điều hòa vừa tắt, chờ đủ thời gian mới bật lại.)"
+            wait = self.s.ac_min_off_seconds - elapsed
+            d.ai_reason += f" (Tạm bật hết quạt: điều hòa vừa tắt, {wait:.0f}s nữa mới được bật lại.)"
+            self._recheck_at = self._ac_changed_at + self.s.ac_min_off_seconds
         else:
-            return
+            return None
+        wait = max(0.0, self._recheck_at - time.monotonic())
+        logger.info("Bảo vệ máy nén: hoãn đổi điều hòa, sẽ quyết định lại sau %.0fs", wait)
         d.mode_label = ""
+        return round(wait)
 
     def _remember(self, inputs: dict) -> None:
         self._last_inputs = dict(inputs)

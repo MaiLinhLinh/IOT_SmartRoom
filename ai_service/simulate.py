@@ -21,6 +21,7 @@ from backend_client import BackendClient
 from config import settings
 from decision_engine import DecisionEngine
 from llm_client import GeminiClient
+import events
 import simulator
 
 # Thời gian rút gọn cho demo (thực tế: AC bật tối thiểu 10 phút, phòng trống chờ 3 phút...)
@@ -90,6 +91,8 @@ def main() -> int:
         inner = simulator.InMemoryBackend()
         if args.with_counter or args.real_people:
             print("⚠ --with-counter / --real-people không dùng được ở mode offline.")
+            events.alert("start", "error", "Tuỳ chọn không hợp lệ", "YOLO / số người thật cần backend.",
+                         "Chọn chế độ khác Tập dượt, hoặc bỏ tick YOLO.")
             return 2
     else:
         inner = BackendClient(settings.backend_url, settings.people_api_key, settings.ai_api_key,
@@ -98,7 +101,32 @@ def main() -> int:
             ctx = inner.get_context()
         except Exception as exc:  # noqa: BLE001
             print(f"✗ Không đọc được {settings.backend_url}/api/ai/context: {exc}")
-            print("  Kiểm tra BACKEND_URL, backend đã chạy và đã áp bản vá AI v4 chưa (lỗi 500 = chưa áp).")
+            msg = str(exc)
+            title, hint = "Không kết nối được backend", "Kiểm tra BACKEND_URL và trạng thái backend."
+            if "localhost" in settings.backend_url or "127.0.0.1" in settings.backend_url:
+                hint = ("BACKEND_URL đang trỏ vào chính máy này nhưng không có backend. Sửa .env: "
+                        "BACKEND_URL=http://<IP máy backend>:8006 — hoặc chọn chế độ Tập dượt.")
+            elif "lỗi kết nối" in msg:
+                hint = "Backend phải chạy với --host 0.0.0.0, đúng IP, mở cổng 8006, cùng mạng."
+            elif "401" in msg:
+                title, hint = "Sai API key", "PEOPLE_API_KEY / AI_API_KEY trong .env phải giống backend/.env."
+            elif "HTTP 500" in msg:
+                title, hint = "Backend báo lỗi 500", "Backend chưa cập nhật API AI v4 — pull bản mới của backend."
+            short = (f"{settings.backend_url} không phản hồi" if "lỗi kết nối" in msg
+                     else f"{settings.backend_url}: {msg[:160]}")
+            events.alert("start", "error", title, short, hint)
+            if "lỗi kết nối" in msg:
+                print(f"  → Không có backend nào trả lời ở {settings.backend_url}.")
+                if "localhost" in settings.backend_url or "127.0.0.1" in settings.backend_url:
+                    print("  → BACKEND_URL đang trỏ vào CHÍNH MÁY NÀY, nhưng máy này không chạy backend.")
+                    print("    Sửa ai_service/.env: BACKEND_URL=http://<IP máy chạy backend>:8006 (hoặc URL tunnel),")
+                    print("    hoặc chọn chế độ 'Tập dượt (offline)' nếu chưa có backend.")
+                else:
+                    print("  → Kiểm tra: backend đang chạy với --host 0.0.0.0, đúng IP, tường lửa mở cổng 8006, cùng mạng.")
+            elif "HTTP 500" in msg:
+                print("  → Backend chưa áp bản vá AI v4 (ai_service/docs/backend_ai_v4.patch).")
+            else:
+                print("  Kiểm tra BACKEND_URL và trạng thái backend.")
             return 2
         if ctx.get("mode") != "AUTO":
             print("⚠ Thiết bị đang MANUAL → AI sẽ không điều khiển. Chuyển sang AUTO trên app/Swagger "
@@ -118,6 +146,8 @@ def main() -> int:
         threading.Thread(target=run_counter_loop, args=(settings, inner, stop),
                          kwargs={"dry_run": dry_run}, daemon=True, name="counter").start()
 
+    events.emit("scenario_start", mode=args.mode, speed=args.speed, dry_run=dry_run,
+                llm=(", ".join(llm.models) if llm else None), **simulator.scenario_event(args.scenario, title, steps))
     print(f"KỊCH BẢN: {name} — {title}")
     print(f"Chế độ: {args.mode} | backend: {settings.backend_url if args.mode != 'offline' else 'giả lập'} | "
           f"LLM: {'Gemini ' + ','.join(llm.models) if llm else 'tắt (dùng planner)'} | "
@@ -134,6 +164,8 @@ def main() -> int:
         stop.set()
 
     failed = simulator.print_summary(results)
+    checked = [r for r in results if r.ok is not None]
+    events.emit("summary", passed=sum(1 for r in checked if r.ok), checked=len(checked), commands=len(sim.sent))
     print(f"Số lệnh AI đã ra: {len(sim.sent)}" + (" (dry-run, không gửi)" if dry_run else ""))
     return 1 if failed else 0
 
